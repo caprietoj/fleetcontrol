@@ -143,6 +143,15 @@
       <!-- Enrolamiento -->
       <section data-view="enroll" class="view hidden">
         <header class="view-head"><h1>Registrar equipos</h1></header>
+        <form class="card" id="urlForm">
+          <h3>Dirección pública del servidor</h3>
+          <p class="muted">Los comandos de instalación, los agentes y el código QR de iPad usan esta dirección. Debe ser el dominio con HTTPS, no la IP.</p>
+          <div class="inline-form" style="margin-top:0">
+            <input name="url" id="publicUrl" placeholder="https://registro.tvs.edu.co" style="flex:1;min-width:260px">
+            <button class="btn primary" type="submit" id="urlSave">Guardar</button>
+          </div>
+          <p class="hint" id="urlHint"></p>
+        </form>
         <div class="card">
           <h3>MacBook Air (macOS)</h3>
           <p class="muted">Abre <b>Terminal</b> en el Mac y pega:</p>

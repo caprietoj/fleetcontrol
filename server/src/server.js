@@ -30,7 +30,20 @@ app.use((req, res, next) => {
   next();
 });
 
-const serverUrl = (req) => (process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+// Dirección pública: 1) variable PUBLIC_URL, 2) la guardada en el panel, 3) la de la petición.
+const URL_RE = /^https?:\/\/[a-z0-9.-]+(:\d{1,5})?$/i;
+const cleanUrl = (u) => String(u || '').trim().replace(/\/+$/, '');
+function publicUrlSource() {
+  if (URL_RE.test(cleanUrl(process.env.PUBLIC_URL))) return 'env';
+  if (URL_RE.test(cleanUrl(getSetting('public_url')))) return 'panel';
+  return 'auto';
+}
+const serverUrl = (req) => {
+  const src = publicUrlSource();
+  if (src === 'env') return cleanUrl(process.env.PUBLIC_URL);
+  if (src === 'panel') return cleanUrl(getSetting('public_url'));
+  return `${req.protocol}://${req.get('host')}`;
+};
 const nowSql = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
 const clientIp = (req) => req.ip;
 
@@ -550,6 +563,8 @@ adminApi.get('/settings', wrap(async (req, res) => {
     enroll_ipad_url: ipadUrl,
     enroll_ipad_qr: await QRCode.toString(ipadUrl, { type: 'svg', margin: 1, color: { dark: BRAND.primary, light: '#ffffff' } }),
     server_url: url,
+    public_url_source: publicUrlSource(),
+    request_url: `${req.protocol}://${req.get('host')}`,
     enrollment_token: token,
     install_macos: `curl -fsSL ${url}/install/macos.sh | sudo bash -s -- ${token}`,
     install_windows: `powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm ${url}/install/windows.ps1))) -Token ${token}"`,
@@ -578,6 +593,14 @@ adminApi.post('/ipads', (req, res) => {
       String(b.notes || '').slice(0, 2000) || null);
   audit(actor(req), 'ipad_registrado_manual', serial, null, clientIp(req));
   res.json({ id });
+});
+adminApi.post('/settings/public-url', (req, res) => {
+  if (publicUrlSource() === 'env') throw new HttpError(400, 'La dirección está fijada con la variable PUBLIC_URL en el servidor; cámbiala allí.');
+  const url = cleanUrl(req.body.url);
+  if (url && !URL_RE.test(url)) throw new HttpError(400, 'Escribe solo el dominio con https://, por ejemplo https://registro.tvs.edu.co');
+  setSetting('public_url', url);
+  audit(actor(req), 'url_publica', url || '(automática)', null, clientIp(req));
+  res.json({ ok: true });
 });
 adminApi.post('/settings/rotate-token', (req, res) => {
   setSetting('enrollment_token', randomToken(24));

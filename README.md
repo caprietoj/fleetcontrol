@@ -52,6 +52,8 @@ Publícalo detrás de un proxy con HTTPS (Caddy, Nginx o Cloudflare Tunnel). La 
 
 ## 2. Registrar los portátiles
 
+> **Primero**, en *Registrar equipos → Dirección pública del servidor* escribe tu dominio (por ejemplo `https://registro.tvs.edu.co`) y guarda. Si no lo haces, los comandos y el QR usan la dirección con la que abriste el panel (por ejemplo `http://IP:puerto`), y los iPad no se registran.
+
 En el panel, ve a **Registrar equipos** y copia el comando de cada plataforma.
 
 **MacBook Air**: en Terminal:
@@ -156,7 +158,7 @@ Si tienes el manual de marca con los códigos HEX oficiales, ponlos en `BRAND_PR
 | Variable | Descripción |
 |---|---|
 | `PORT` | Puerto HTTP (por defecto 8080) |
-| `PUBLIC_URL` | URL pública con https, usada en los comandos de instalación |
+| `PUBLIC_URL` | URL pública con https, usada en los comandos de instalación y el QR de iPad. También se puede fijar en el panel (*Registrar equipos → Dirección pública del servidor*); la variable tiene prioridad |
 | `DATA_DIR` | Carpeta de la base de datos (por defecto `server/data`) |
 | `ADMIN_USER` / `ADMIN_PASSWORD` | Administrador inicial (solo en el primer arranque) |
 | `TRUST_PROXY` | `0` si el servidor **no** está detrás de un proxy |

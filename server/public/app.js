@@ -482,6 +482,14 @@ $('#googleForm').addEventListener('submit', async (e) => {
 // ===================== enrolamiento =====================
 function loadEnroll() {
   const s = state.settings;
+  const env = s.public_url_source === 'env';
+  $('#publicUrl').value = s.public_url_source === 'auto' ? '' : s.server_url;
+  $('#publicUrl').disabled = env; $('#urlSave').disabled = env;
+  $('#urlHint').innerHTML = env
+    ? 'Fijada con la variable <code>PUBLIC_URL</code> en el servidor.'
+    : s.public_url_source === 'panel'
+      ? `Guardada en el panel. Déjala vacía y guarda para volver a la automática (${esc(s.request_url)}).`
+      : `Ahora se usa la dirección con la que abriste el panel: <b>${esc(s.request_url)}</b>. Escribe tu dominio con https:// y guarda.`;
   $('#cmdMac').textContent = s.install_macos;
   $('#cmdWin').textContent = s.install_windows;
   $('#cmdIpad').textContent = s.enroll_ipad_url;
@@ -493,6 +501,16 @@ $('#rotateBtn').addEventListener('click', async () => {
   if (!confirm('¿Generar un nuevo token? Los comandos de instalación anteriores dejarán de funcionar.')) return;
   await api('/settings/rotate-token', { method: 'POST', body: {} });
   state.settings = await api('/settings'); loadEnroll(); toast('Token renovado');
+});
+
+$('#urlForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await api('/settings/public-url', { method: 'POST', body: { url: $('#publicUrl').value } });
+    state.settings = await api('/settings');
+    $('#insecureBanner').classList.toggle('hidden', !state.settings.insecure);
+    loadEnroll(); toast('Dirección guardada: comandos y QR actualizados');
+  } catch (err) { toast(err.message, true); }
 });
 
 $('#ipadForm').addEventListener('submit', async (e) => {
