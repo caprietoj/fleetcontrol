@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FleetControl · Gestión de portátiles</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Login -->
+  <section id="login" class="login hidden">
+    <form id="loginForm" class="login-card">
+      <div class="brand big"><span class="logo">◧</span> FleetControl</div>
+      <p class="muted">Gestión de MacBook y Lenovo</p>
+      <label>Usuario<input name="username" autocomplete="username" required></label>
+      <label>Contraseña<input name="password" type="password" autocomplete="current-password" required></label>
+      <button class="btn primary block" type="submit">Entrar</button>
+      <p id="loginError" class="error"></p>
+    </form>
+  </section>
+
+  <!-- App -->
+  <div id="app" class="app hidden">
+    <aside class="sidebar">
+      <div class="brand"><span class="logo">◧</span> FleetControl</div>
+      <nav>
+        <a data-view="devices" class="active">Dispositivos</a>
+        <a data-view="software">Catálogo de software</a>
+        <a data-view="history">Historial de acciones</a>
+        <a data-view="google">Google Workspace</a>
+        <a data-view="enroll">Registrar equipos</a>
+        <a data-view="settings">Administradores</a>
+        <a data-view="audit">Auditoría</a>
+      </nav>
+      <div class="sidebar-foot">
+        <span id="whoami" class="muted"></span>
+        <button id="logoutBtn" class="btn ghost small">Salir</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div id="insecureBanner" class="banner warn hidden">
+        El panel no usa HTTPS. Los tokens viajan sin cifrar: publica el servidor detrás de HTTPS antes de usarlo en producción.
+      </div>
+
+      <!-- Dispositivos -->
+      <section data-view="devices" class="view">
+        <header class="view-head">
+          <h1>Dispositivos</h1>
+          <button class="btn" data-goto="enroll">+ Registrar equipo</button>
+        </header>
+        <div class="stats" id="stats"></div>
+        <div class="filters">
+          <input id="search" type="search" placeholder="Buscar por nombre, serie, usuario, correo…">
+          <select id="fPlatform"><option value="">Todas las plataformas</option><option value="macos">macOS</option><option value="windows">Windows</option></select>
+          <select id="fGroup"><option value="">Todos los grupos</option></select>
+          <select id="fStatus"><option value="">Todos los estados</option><option value="online">En línea</option><option value="offline">Desconectados</option><option value="retired">Retirados</option></select>
+        </div>
+        <div id="bulkBar" class="bulkbar">
+          <span id="selCount">0 seleccionados</span>
+          <div class="actions">
+            <button class="btn" data-action="google_signout">Cerrar sesiones Google</button>
+            <button class="btn" data-action="clean_browsers">Limpiar navegadores</button>
+            <button class="btn" data-action="delete_files">Eliminar archivos</button>
+            <button class="btn" data-action="install_software">Instalar software</button>
+            <div class="more">
+              <button class="btn" id="moreBtn">Más ▾</button>
+              <div class="menu hidden" id="moreMenu">
+                <a data-action="uninstall_software">Desinstalar software</a>
+                <a data-action="list_software">Inventario de software</a>
+                <a data-action="run_script">Ejecutar script</a>
+                <a data-action="message">Enviar mensaje al usuario</a>
+                <a data-action="restart">Reiniciar</a>
+                <a data-action="shutdown">Apagar</a>
+                <a data-action="set_group">Asignar grupo</a>
+                <a data-action="update_agent">Actualizar agente</a>
+                <a data-action="remove_agent" class="danger">Desinstalar agente</a>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="table" id="devTable">
+            <thead><tr>
+              <th class="chk"><input type="checkbox" id="selAll"></th>
+              <th>Equipo</th><th>Usuario / Google</th><th>Sistema</th><th>Disco</th><th>Grupo</th><th>Última conexión</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+          <p id="devEmpty" class="empty hidden">Aún no hay equipos. Ve a <a data-goto="enroll">Registrar equipos</a> para instalar el agente.</p>
+        </div>
+      </section>
+
+      <!-- Software -->
+      <section data-view="software" class="view hidden">
+        <header class="view-head"><h1>Catálogo de software</h1></header>
+        <p class="muted">Agrega aquí los instaladores. Luego, en Dispositivos, selecciona los equipos y usa “Instalar software”.</p>
+        <form id="pkgForm" class="card form-grid">
+          <label>Nombre<input name="name" placeholder="Google Chrome" required></label>
+          <label>Plataforma
+            <select name="platform" id="pkgPlatform"><option value="macos">macOS</option><option value="windows">Windows</option></select>
+          </label>
+          <label>Tipo<select name="kind" id="pkgKind"></select></label>
+          <label class="span2">URL o ID<input name="source" id="pkgSource" required></label>
+          <label>Argumentos (opcional)<input name="args" id="pkgArgs" placeholder=""></label>
+          <label class="span2">SHA-256 (opcional, recomendado)<input name="sha256" placeholder="verifica la integridad del archivo"></label>
+          <div class="form-actions"><button class="btn primary" type="submit">Agregar al catálogo</button></div>
+          <p id="pkgHint" class="hint span3"></p>
+        </form>
+        <div class="table-wrap">
+          <table class="table" id="pkgTable"><thead><tr><th>Nombre</th><th>Plataforma</th><th>Tipo</th><th>Origen</th><th></th></tr></thead><tbody></tbody></table>
+        </div>
+      </section>
+
+      <!-- Historial -->
+      <section data-view="history" class="view hidden">
+        <header class="view-head"><h1>Historial de acciones</h1>
+          <select id="hStatus"><option value="">Todos</option><option value="pending">Pendientes</option><option value="running">En ejecución</option><option value="success">Correctos</option><option value="failed">Fallidos</option></select>
+        </header>
+        <div class="table-wrap">
+          <table class="table clickable" id="histTable"><thead><tr><th>#</th><th>Equipo</th><th>Acción</th><th>Detalle</th><th>Estado</th><th>Por</th><th>Creado</th></tr></thead><tbody></tbody></table>
+        </div>
+      </section>
+
+      <!-- Google -->
+      <section data-view="google" class="view hidden">
+        <header class="view-head"><h1>Google Workspace</h1></header>
+        <div class="card" id="googleStatus"></div>
+        <form id="googleForm" class="card">
+          <h3>Cerrar sesiones por correo</h3>
+          <p class="muted">Cierra todas las sesiones de estas cuentas en cualquier equipo, navegador y móvil (no depende del agente).</p>
+          <textarea name="emails" rows="3" placeholder="ana@tuempresa.com, luis@tuempresa.com"></textarea>
+          <label class="check"><input type="checkbox" name="revoke"> También revocar accesos de aplicaciones de terceros (OAuth)</label>
+          <button class="btn primary" type="submit">Cerrar sesiones</button>
+          <pre id="googleOut" class="output hidden"></pre>
+        </form>
+      </section>
+
+      <!-- Enrolamiento -->
+      <section data-view="enroll" class="view hidden">
+        <header class="view-head"><h1>Registrar equipos</h1></header>
+        <div class="card">
+          <h3>MacBook Air (macOS)</h3>
+          <p class="muted">Abre <b>Terminal</b> en el Mac y pega:</p>
+          <div class="copy"><code id="cmdMac"></code><button class="btn small" data-copy="cmdMac">Copiar</button></div>
+          <p class="hint">Después concede <b>Acceso total al disco</b> a <code>/bin/bash</code> (Ajustes del Sistema → Privacidad y seguridad) para poder limpiar Safari y carpetas personales. Con un MDM puedes hacerlo con un perfil PPPC.</p>
+        </div>
+        <div class="card">
+          <h3>Lenovo (Windows 10/11)</h3>
+          <p class="muted">Abre <b>PowerShell como Administrador</b> y pega:</p>
+          <div class="copy"><code id="cmdWin"></code><button class="btn small" data-copy="cmdWin">Copiar</button></div>
+        </div>
+        <div class="card">
+          <h3>Token de enrolamiento</h3>
+          <p class="muted">Cualquiera con este token puede registrar un equipo. Rótalo cuando termines de registrar un lote; los equipos ya registrados no se ven afectados.</p>
+          <div class="copy"><code id="enrollToken"></code><button class="btn small danger-outline" id="rotateBtn">Generar nuevo</button></div>
+        </div>
+      </section>
+
+      <!-- Administradores -->
+      <section data-view="settings" class="view hidden">
+        <header class="view-head"><h1>Administradores</h1></header>
+        <div class="grid2">
+          <div class="card">
+            <h3>Usuarios del panel</h3>
+            <table class="table compact" id="adminTable"><tbody></tbody></table>
+            <form id="adminForm" class="inline-form">
+              <input name="username" placeholder="usuario" required>
+              <input name="password" type="password" placeholder="contraseña (mín. 10)" required>
+              <button class="btn" type="submit">Agregar</button>
+            </form>
+          </div>
+          <form class="card" id="pwForm">
+            <h3>Cambiar mi contraseña</h3>
+            <label>Actual<input name="current" type="password" required></label>
+            <label>Nueva<input name="next" type="password" minlength="10" required></label>
+            <button class="btn primary" type="submit">Guardar</button>
+          </form>
+        </div>
+      </section>
+
+      <!-- Auditoría -->
+      <section data-view="audit" class="view hidden">
+        <header class="view-head"><h1>Auditoría</h1></header>
+        <div class="table-wrap">
+          <table class="table compact" id="auditTable"><thead><tr><th>Fecha</th><th>Quién</th><th>Acción</th><th>Objetivo</th><th>IP</th></tr></thead><tbody></tbody></table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Panel lateral del dispositivo -->
+  <div id="drawer" class="drawer hidden">
+    <div class="drawer-panel">
+      <button class="close" data-close="drawer">×</button>
+      <div id="drawerBody"></div>
+    </div>
+  </div>
+
+  <!-- Modal genérico -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <button class="close" data-close="modal">×</button>
+      <div id="modalBody"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="app.js"></script>
+</body>
+</html>

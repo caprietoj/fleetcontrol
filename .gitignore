@@ -1,0 +1,7 @@
+node_modules/
+server/data/
+.env
+secrets/
+data/
+*.zip
+.DS_Store

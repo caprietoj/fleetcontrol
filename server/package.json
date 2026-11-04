@@ -1,0 +1,16 @@
+{
+  "name": "fleetcontrol-server",
+  "version": "1.0.0",
+  "description": "Panel para administrar MacBook y Lenovo",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --no-warnings src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.22.3"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "private": true
+}
