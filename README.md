@@ -1,6 +1,6 @@
-# FleetControl: gestión de MacBook Air y Lenovo
+# FleetControl: gestión de equipos TI · The Victoria School
 
-FleetControl es una plataforma propia para registrar y administrar portátiles **macOS** y **Windows (Lenovo)** desde un panel web:
+FleetControl es una plataforma propia para registrar y administrar portátiles **macOS** y **Windows (Lenovo)** y **iPad (7.ª generación y otros)** desde un panel web con la imagen de The Victoria School:
 
 - **Registro de equipos** con un solo comando. El inventario se actualiza solo: modelo, número de serie, sistema, disco, RAM, IP, usuario conectado y cuentas de Google con sesión en el navegador.
 - **Cierre de sesiones de Google Workspace** en todos los dispositivos del usuario (Gmail, Drive, etc.) a través de la API de administración de Google, más la limpieza local de cookies.
@@ -66,6 +66,18 @@ Después concede **Acceso total al disco** a `/bin/bash` en *Ajustes del Sistema
 powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://mdm.tuempresa.com/install/windows.ps1))) -Token TOKEN"
 ```
 
+**iPad (7.ª generación u otros con iPadOS 13 o superior)**: en el panel, ve a **Registrar equipos → iPad**.
+1. En el iPad, abre la **Cámara** y escanea el código QR, o abre el enlace en **Safari**.
+2. Toca **Permitir** para descargar el perfil.
+3. Ve a **Ajustes → Perfil descargado → Instalar** e ingresa el código del iPad.
+4. El iPad envía su número de serie, UDID y modelo (por ejemplo `iPad (7.ª generación) Wi-Fi (iPad7,11)`) y aparece en **Dispositivos**. Queda instalado el perfil "The Victoria School · Equipo registrado", con un acceso directo al sitio del colegio.
+
+El registro por perfil **requiere HTTPS con un certificado válido**: iPadOS no instala perfiles servidos por `http://`. El perfil aparecerá como "No verificado" porque no está firmado; es normal.
+
+También puedes registrar iPad **a mano** (número de serie, asignado a, correo y grupo) en *Registrar equipos → Registrar un iPad manualmente*.
+
+> **Qué se puede hacer con un iPad**: inventario, grupos, asignación a una persona y **cerrar sus sesiones de Google Workspace** (el cierre lo hace Google en todos los dispositivos de la cuenta, iPad incluido). Apple no permite ejecutar scripts en iPadOS, así que **borrar el iPad, instalar o quitar apps, limpiar Safari o bloquearlo** solo es posible con un **MDM de Apple** (protocolo MDM con certificado APNs). Para un colegio, lo más práctico es **Apple School Manager** junto con un MDM gratuito para educación, como **Mosyle Manager**, o uno de pago como Jamf School. Este panel puede seguir siendo el inventario y el control de Google.
+
 Para registrar muchos equipos a la vez, distribuye ese comando con lo que ya uses (GPO o script de inicio en Windows; Apple Remote Desktop o un script en Mac). Cuando termines un lote, rota el token desde el panel.
 
 Archivos del agente:
@@ -122,6 +134,21 @@ La plataforma toma los correos a cerrar del campo “Correo Google Workspace asi
 
 ---
 
+## Marca institucional
+
+El panel muestra el nombre, el logo y los colores de The Victoria School. Puedes cambiarlos sin tocar el código con estas variables de entorno:
+
+| Variable | Valor por defecto |
+|---|---|
+| `BRAND_NAME` | `The Victoria School` |
+| `BRAND_PRODUCT` | `Gestión de equipos TI` |
+| `BRAND_PRIMARY` | `#0b2a55` (azul marino: barra lateral y títulos) |
+| `BRAND_ACCENT` | `#1d5fb8` (azul: botones y enlaces) |
+| `BRAND_LOGO_URL` | Logo horizontal publicado en thevictoriaschool.edu.co (déjalo vacío para no mostrar logo) |
+| `BRAND_SITE` | `https://thevictoriaschool.edu.co/` (acceso directo que se instala en los iPad) |
+
+Si tienes el manual de marca con los códigos HEX oficiales, ponlos en `BRAND_PRIMARY` y `BRAND_ACCENT`. Si prefieres no depender del sitio web para el logo, copia el archivo a `server/public/logo.png` y usa `BRAND_LOGO_URL=/logo.png`.
+
 ## Variables de entorno
 
 | Variable | Descripción |
@@ -146,6 +173,7 @@ server/
   src/server.js            API del panel y de los agentes
   src/db.js                Base de datos SQLite
   src/google.js            Google Workspace (signOut, revocar tokens)
+  src/ipad.js              Registro de iPad por perfil (Profile Service)
   src/scripts/commands.js  Validación y generación de scripts bash/PowerShell
   src/scripts/browsers.js  Rutas de datos de cada navegador
   public/                  Panel web

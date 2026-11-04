@@ -88,6 +88,11 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 `);
 
+// ---------- migraciones ----------
+for (const col of ['udid TEXT', 'imei TEXT', "enroll_method TEXT DEFAULT 'agent'"]) {
+  try { db.exec(`ALTER TABLE devices ADD COLUMN ${col}`); } catch { /* ya existe */ }
+}
+
 // ---------- helpers ----------
 const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 const randomToken = (bytes = 32) => crypto.randomBytes(bytes).toString('base64url');

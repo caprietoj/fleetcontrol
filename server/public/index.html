@@ -3,15 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FleetControl · Gestión de portátiles</title>
+  <title>Gestión de equipos TI</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <!-- Login -->
   <section id="login" class="login hidden">
     <form id="loginForm" class="login-card">
-      <div class="brand big"><span class="logo">◧</span> FleetControl</div>
-      <p class="muted">Gestión de MacBook y Lenovo</p>
+      <img class="login-logo brand-logo" alt="" hidden>
+      <div class="brand big"><span class="brand-name">FleetControl</span></div>
+      <p class="muted"><span class="brand-product">Gestión de equipos TI</span> · MacBook, Lenovo y iPad</p>
       <label>Usuario<input name="username" autocomplete="username" required></label>
       <label>Contraseña<input name="password" type="password" autocomplete="current-password" required></label>
       <button class="btn primary block" type="submit">Entrar</button>
@@ -22,7 +23,10 @@
   <!-- App -->
   <div id="app" class="app hidden">
     <aside class="sidebar">
-      <div class="brand"><span class="logo">◧</span> FleetControl</div>
+      <div class="brand side-brand">
+        <div class="logo-chip"><img class="brand-logo" alt="" hidden></div>
+        <div><span class="brand-name">FleetControl</span><small class="brand-product">Gestión de equipos TI</small></div>
+      </div>
       <nav>
         <a data-view="devices" class="active">Dispositivos</a>
         <a data-view="software">Catálogo de software</a>
@@ -52,7 +56,7 @@
         <div class="stats" id="stats"></div>
         <div class="filters">
           <input id="search" type="search" placeholder="Buscar por nombre, serie, usuario, correo…">
-          <select id="fPlatform"><option value="">Todas las plataformas</option><option value="macos">macOS</option><option value="windows">Windows</option></select>
+          <select id="fPlatform"><option value="">Todas las plataformas</option><option value="macos">macOS</option><option value="windows">Windows</option><option value="ipados">iPad</option></select>
           <select id="fGroup"><option value="">Todos los grupos</option></select>
           <select id="fStatus"><option value="">Todos los estados</option><option value="online">En línea</option><option value="offline">Desconectados</option><option value="retired">Retirados</option></select>
         </div>
@@ -151,8 +155,38 @@
           <div class="copy"><code id="cmdWin"></code><button class="btn small" data-copy="cmdWin">Copiar</button></div>
         </div>
         <div class="card">
+          <h3>iPad (7.ª generación u otros, iPadOS 13 o superior)</h3>
+          <div class="ipad-enroll">
+            <div class="qr" id="ipadQr"></div>
+            <div>
+              <ol class="steps">
+                <li>En el iPad, abre la <b>Cámara</b> y apunta a este código (o abre el enlace en <b>Safari</b>).</li>
+                <li>Toca <b>Permitir</b> para descargar el perfil.</li>
+                <li>Ve a <b>Ajustes → Perfil descargado → Instalar</b> e ingresa el código del iPad.</li>
+                <li>El iPad aparece en <b>Dispositivos</b> con su número de serie y modelo.</li>
+              </ol>
+              <div class="copy"><code id="cmdIpad"></code><button class="btn small" data-copy="cmdIpad">Copiar</button></div>
+            </div>
+          </div>
+          <p class="hint">Los iPad quedan en el inventario y se les pueden cerrar las sesiones de Google Workspace. Para borrarlos, instalarles apps o bloquearlos de forma remota se necesita un MDM de Apple (ver README).</p>
+          <details>
+            <summary>Registrar un iPad manualmente (sin perfil)</summary>
+            <form id="ipadForm" class="form-grid" style="margin-top:10px">
+              <label>Número de serie<input name="serial" required placeholder="DMPXXXXXXXXX"></label>
+              <label>Nombre<input name="name" placeholder="iPad Biblioteca 03"></label>
+              <label>Modelo<input name="model" value="iPad (7.ª generación)"></label>
+              <label>Versión de iPadOS<input name="os_version" placeholder="18.1"></label>
+              <label>Asignado a<input name="assigned_to" placeholder="Nombre del estudiante o docente"></label>
+              <label>Correo Google Workspace<input name="google_email" placeholder="usuario@tvs.edu.co"></label>
+              <label>Grupo<input name="group_name" placeholder="Grado 5A"></label>
+              <label class="span2">Notas<input name="notes"></label>
+              <div class="form-actions span3"><button class="btn primary" type="submit">Agregar iPad</button></div>
+            </form>
+          </details>
+        </div>
+        <div class="card">
           <h3>Token de enrolamiento</h3>
-          <p class="muted">Cualquiera con este token puede registrar un equipo. Rótalo cuando termines de registrar un lote; los equipos ya registrados no se ven afectados.</p>
+          <p class="muted">Cualquiera con este token (o con el código QR de iPad) puede registrar un equipo. Rótalo cuando termines de registrar un lote; los equipos ya registrados no se ven afectados.</p>
           <div class="copy"><code id="enrollToken"></code><button class="btn small danger-outline" id="rotateBtn">Generar nuevo</button></div>
         </div>
       </section>

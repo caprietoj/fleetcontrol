@@ -17,6 +17,30 @@ async function api(path, opts = {}) {
   return data;
 }
 
+// Copiar al portapapeles. navigator.clipboard solo existe en HTTPS o localhost;
+// si el panel se abre por http://IP se usa el método clásico con un textarea.
+async function copyText(text, el) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return toast('Copiado al portapapeles');
+    }
+  } catch { /* se intenta el método clásico */ }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+  document.body.appendChild(ta);
+  ta.focus(); ta.select(); ta.setSelectionRange(0, text.length);
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch { ok = false; }
+  document.body.removeChild(ta);
+  if (ok) return toast('Copiado al portapapeles');
+  // Último recurso: dejar el texto seleccionado para que el usuario lo copie
+  if (el) { const r = document.createRange(); r.selectNodeContents(el); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); }
+  toast('Texto seleccionado: presiona Ctrl+C (o Cmd+C) para copiarlo', true);
+}
+
 function toast(msg, isErr = false) {
   const t = $('#toast');
   t.textContent = msg; t.className = 'toast' + (isErr ? ' err' : '');
@@ -35,7 +59,8 @@ function ago(ts) {
 const fmtDate = (ts) => (ts ? new Date(ts.replace(' ', 'T') + 'Z').toLocaleString('es-CO') : '');
 const STATUS = { pending: 'Pendiente', running: 'Ejecutando', success: 'Correcto', failed: 'Falló', cancelled: 'Cancelado', skipped: 'Omitido' };
 const stBadge = (s) => `<span class="st ${esc(s)}">${STATUS[s] || esc(s)}</span>`;
-const platTag = (p) => (p === 'macos' ? '<span class="tag mac">macOS</span>' : '<span class="tag win">Windows</span>');
+const platTag = (p) => ({ macos: '<span class="tag mac">macOS</span>', windows: '<span class="tag win">Windows</span>', ipados: '<span class="tag ipad">iPad</span>' }[p] || esc(p));
+const isIpad = (d) => d.platform === 'ipados';
 
 // ===================== estado =====================
 const state = { devices: [], selected: new Set(), settings: null, packages: [], view: 'devices' };
@@ -70,7 +95,7 @@ document.addEventListener('click', (e) => {
   const c = e.target.closest('[data-close]');
   if (c) { $('#' + c.dataset.close).classList.add('hidden'); return; }
   const cp = e.target.closest('[data-copy]');
-  if (cp) { navigator.clipboard.writeText($('#' + cp.dataset.copy).textContent).then(() => toast('Copiado')); }
+  if (cp) copyText($('#' + cp.dataset.copy).textContent, $('#' + cp.dataset.copy));
 });
 ['drawer', 'modal'].forEach((id) => $('#' + id).addEventListener('click', (e) => { if (e.target.id === id) e.target.classList.add('hidden'); }));
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { $('#modal').classList.add('hidden'); $('#drawer').classList.add('hidden'); } });
@@ -83,7 +108,7 @@ async function loadDevices() {
   state.selected.forEach((id) => { if (!ids.has(id)) state.selected.delete(id); });
   $('#stats').innerHTML = [
     ['Equipos', stats.total || 0], ['En línea', stats.online || 0], ['MacBook', stats.macos || 0],
-    ['Windows / Lenovo', stats.windows || 0], ['Acciones en cola', stats.pending || 0],
+    ['Windows / Lenovo', stats.windows || 0], ['iPad', stats.ipados || 0], ['Acciones en cola', stats.pending || 0],
   ].map(([l, v]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join('');
   const groups = [...new Set(devices.map((d) => d.group_name).filter(Boolean))].sort();
   const fg = $('#fGroup'); const cur = fg.value;
@@ -117,14 +142,14 @@ function renderDevices() {
     const g = [d.google_email, ...(d.google_accounts || [])].filter((x, i, a) => x && a.indexOf(x) === i);
     return `<tr data-id="${esc(d.id)}">
       <td class="chk"><input type="checkbox" ${state.selected.has(d.id) ? 'checked' : ''}></td>
-      <td><span class="dot ${d.online && d.status !== 'retired' ? 'on' : ''}"></span><b>${esc(d.hostname || '(sin nombre)')}</b>
+      <td><span class="dot ${d.online && d.status !== 'retired' ? 'on' : ''} ${isIpad(d) ? 'ipad' : ''}"></span><b>${esc(d.hostname || '(sin nombre)')}</b>
         ${d.pending ? ` <span class="tag">${d.pending} en cola</span>` : ''}${d.status === 'retired' ? ' <span class="tag">retirado</span>' : ''}
         <div class="sub">${esc(d.model || '')} · S/N ${esc(d.serial || '—')}</div></td>
-      <td>${esc(d.logged_user || '—')}<div class="sub">${g.map(esc).join(', ') || 'sin cuenta Google detectada'}</div></td>
+      <td>${esc(d.logged_user || '—')}<div class="sub">${g.map(esc).join(', ') || (isIpad(d) ? 'asigna un correo en la ficha' : 'sin cuenta Google detectada')}</div></td>
       <td>${platTag(d.platform)}<div class="sub">${esc(d.os_version || '')}</div></td>
       <td>${pct === null ? '—' : `${d.disk_free_gb} GB libres<div class="bar"><i class="${pct < 10 ? 'low' : ''}" style="width:${100 - pct}%"></i></div>`}</td>
       <td>${d.group_name ? `<span class="tag">${esc(d.group_name)}</span>` : '<span class="sub">—</span>'}</td>
-      <td>${ago(d.last_seen)}<div class="sub">${esc(d.ip || '')}</div></td>
+      <td>${isIpad(d) ? `<span class="sub">${d.enroll_method === 'manual' ? 'Registro manual' : 'Perfil instalado ' + ago(d.last_seen)}</span>` : `${ago(d.last_seen)}<div class="sub">${esc(d.ip || '')}</div>`}</td>
     </tr>`;
   }).join('');
   updateSelection();
@@ -170,29 +195,31 @@ async function openDevice(id) {
   const body = $('#drawerBody');
   body.innerHTML = `
     <h1><span class="dot ${d.online ? 'on' : ''}"></span>${esc(d.hostname)}</h1>
-    <p class="muted">${platTag(d.platform)} ${esc(d.model || '')} · ${d.online ? 'En línea' : 'Desconectado'} · visto ${ago(d.last_seen)}</p>
+    <p class="muted">${platTag(d.platform)} ${esc(d.model || '')} · ${isIpad(d) ? (d.enroll_method === 'manual' ? 'registrado manualmente' : 'registrado por perfil ' + ago(d.last_seen)) : `${d.online ? 'En línea' : 'Desconectado'} · visto ${ago(d.last_seen)}`}</p>
     <div class="quick">
-      ${['google_signout', 'clean_browsers', 'delete_files', 'install_software', 'list_software', 'message', 'restart']
+      ${(isIpad(d) ? ['google_signout'] : ['google_signout', 'clean_browsers', 'delete_files', 'install_software', 'list_software', 'message', 'restart'])
         .map((t) => `<button class="btn small" data-act="${t}">${esc(state.settings.types[t])}</button>`).join('')}
     </div>
+    ${isIpad(d) ? `<div class="warnbox" style="margin-top:10px">En iPad solo está disponible <b>Cerrar sesiones de Google</b> (asigna el correo abajo). Borrar el iPad, instalar apps o limpiar Safari requiere un MDM de Apple. Para quitarlo: en el iPad, Ajustes → General → VPN y gestión de dispositivos → eliminar el perfil.</div>` : ''}
     <div class="section-title">Información</div>
     <dl class="kv">
       <dt>Número de serie</dt><dd>${esc(d.serial || '—')}</dd>
       <dt>Fabricante</dt><dd>${esc(d.manufacturer || '—')}</dd>
       <dt>Sistema</dt><dd>${esc(d.os_version || '—')}</dd>
-      <dt>Procesador</dt><dd>${esc(d.cpu || '—')}</dd>
+      ${isIpad(d) ? '' : `<dt>Procesador</dt><dd>${esc(d.cpu || '—')}</dd>
       <dt>Memoria</dt><dd>${d.ram_gb ? esc(d.ram_gb) + ' GB' : '—'}</dd>
-      <dt>Disco</dt><dd>${d.disk_total_gb ? `${esc(d.disk_free_gb)} GB libres de ${esc(d.disk_total_gb)} GB` : '—'}</dd>
-      <dt>IP</dt><dd>${esc(d.ip || '—')}</dd>
-      <dt>Usuario actual</dt><dd>${esc(d.logged_user || '—')}</dd>
-      <dt>Cuentas Google detectadas</dt><dd>${(d.google_accounts || []).map(esc).join('<br>') || '—'}</dd>
+      <dt>Disco</dt><dd>${d.disk_total_gb ? `${esc(d.disk_free_gb)} GB libres de ${esc(d.disk_total_gb)} GB` : '—'}</dd>`}
+      ${isIpad(d) ? `<dt>UDID</dt><dd>${esc(d.udid || '—')}</dd><dt>IMEI</dt><dd>${esc(d.imei || '—')}</dd><dt>Asignado a</dt><dd>${esc(d.logged_user || '—')}</dd>`
+        : `<dt>IP</dt><dd>${esc(d.ip || '—')}</dd><dt>Usuario actual</dt><dd>${esc(d.logged_user || '—')}</dd>`}
+      ${isIpad(d) ? '' : `<dt>Cuentas Google detectadas</dt><dd>${(d.google_accounts || []).map(esc).join('<br>') || '—'}</dd>`}
       <dt>Registrado</dt><dd>${fmtDate(d.enrolled_at)}</dd>
-      <dt>Agente</dt><dd>${esc(d.agent_version || '—')}</dd>
+      <dt>${isIpad(d) ? 'Registro' : 'Agente'}</dt><dd>${isIpad(d) ? (d.enroll_method === 'manual' ? 'Manual' : 'Perfil de configuración') : esc(d.agent_version || '—')}</dd>
     </dl>
     <div class="section-title">Administración</div>
     <form id="devForm" class="card">
-      <label>Correo Google Workspace asignado<input name="google_email" value="${esc(d.google_email || '')}" placeholder="usuario@tuempresa.com"></label>
-      <label>Grupo<input name="group_name" value="${esc(d.group_name || '')}" placeholder="Ventas, Diseño…" list="groupList"></label>
+      ${isIpad(d) ? `<label>Asignado a<input name="assigned_to" value="${esc(d.logged_user || '')}" placeholder="Estudiante, docente o área"></label>` : ''}
+      <label>Correo Google Workspace asignado<input name="google_email" value="${esc(d.google_email || '')}" placeholder="usuario@tvs.edu.co"></label>
+      <label>Grupo<input name="group_name" value="${esc(d.group_name || '')}" placeholder="Grado 5A, Docentes, Administrativos…" list="groupList"></label>
       <datalist id="groupList">${[...new Set(state.devices.map((x) => x.group_name).filter(Boolean))].map((g) => `<option value="${esc(g)}">`).join('')}</datalist>
       <label>Notas<textarea name="notes" rows="2">${esc(d.notes || '')}</textarea></label>
       <div class="modal-actions">
@@ -232,12 +259,14 @@ const ITEMS = [['cookies', 'Cookies'], ['sessions', 'Sesiones y almacenamiento d
 const checks = (name, opts, on = []) => `<div class="checks">${opts.map(([v, l]) =>
   `<label class="check"><input type="checkbox" name="${name}" value="${v}" ${on.includes(v) ? 'checked' : ''}> ${esc(l)}</label>`).join('')}</div>`;
 
-function selectedSummary(ids) {
+function selectedSummary(ids, type) {
   const devs = state.devices.filter((d) => ids.includes(d.id));
   const mac = devs.filter((d) => d.platform === 'macos').length;
-  const win = devs.length - mac;
-  const off = devs.filter((d) => !d.online).length;
-  return `<p class="muted">${devs.length} equipo(s): ${mac} macOS, ${win} Windows.${off ? ` ${off} desconectado(s): la acción quedará en cola y se ejecutará cuando se conecten.` : ''}</p>`;
+  const win = devs.filter((d) => d.platform === 'windows').length;
+  const ipads = devs.filter(isIpad).length;
+  const off = devs.filter((d) => !isIpad(d) && !d.online).length;
+  return `<p class="muted">${devs.length} equipo(s): ${mac} macOS, ${win} Windows${ipads ? `, ${ipads} iPad` : ''}.${off ? ` ${off} desconectado(s): la acción quedará en cola y se ejecutará cuando se conecten.` : ''}</p>
+    ${ipads && type !== 'google_signout' && type !== 'set_group' ? `<div class="warnbox">Los ${ipads} iPad seleccionados se omitirán: esta acción requiere un MDM de Apple.</div>` : ''}`;
 }
 
 async function openAction(type, ids) {
@@ -314,7 +343,7 @@ async function openAction(type, ids) {
       break;
   }
 
-  $('#modalBody').innerHTML = `<h1>${esc(type === 'set_group' ? 'Asignar grupo' : T[type])}</h1>${selectedSummary(ids)}
+  $('#modalBody').innerHTML = `<h1>${esc(type === 'set_group' ? 'Asignar grupo' : T[type])}</h1>${selectedSummary(ids, type)}
     <form id="actionForm" class="card" style="border:0;padding:0">${form}
       ${confirmWord ? `<label>Escribe <b>${confirmWord}</b> para confirmar<input name="confirm" autocomplete="off"></label>` : ''}
       <div class="modal-actions"><button type="button" class="btn" data-close="modal">Cancelar</button>
@@ -455,12 +484,22 @@ function loadEnroll() {
   const s = state.settings;
   $('#cmdMac').textContent = s.install_macos;
   $('#cmdWin').textContent = s.install_windows;
+  $('#cmdIpad').textContent = s.enroll_ipad_url;
+  $('#ipadQr').innerHTML = s.enroll_ipad_qr;
   $('#enrollToken').textContent = s.enrollment_token;
 }
 $('#rotateBtn').addEventListener('click', async () => {
   if (!confirm('¿Generar un nuevo token? Los comandos de instalación anteriores dejarán de funcionar.')) return;
   await api('/settings/rotate-token', { method: 'POST', body: {} });
   state.settings = await api('/settings'); loadEnroll(); toast('Token renovado');
+});
+
+$('#ipadForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    await api('/ipads', { method: 'POST', body: Object.fromEntries(new FormData(e.target)) });
+    e.target.reset(); e.target.model.value = 'iPad (7.ª generación)'; toast('iPad agregado'); loadDevices();
+  } catch (err) { toast(err.message, true); }
 });
 
 // ===================== administradores =====================
@@ -492,6 +531,26 @@ async function loadAudit() {
     <td>${esc(a.action)}</td><td>${esc(a.target || '')}</td><td class="sub">${esc(a.ip || '')}</td></tr>`).join('');
 }
 
+// ===================== marca institucional =====================
+async function loadBrand() {
+  try {
+    const b = await (await fetch('/api/brand')).json();
+    const root = document.documentElement.style;
+    root.setProperty('--side', b.primary);
+    root.setProperty('--accent', b.accent);
+    root.setProperty('--brand', b.primary);
+    $$('.brand-name').forEach((el) => (el.textContent = b.name));
+    $$('.brand-product').forEach((el) => (el.textContent = b.product));
+    document.title = `${b.product} · ${b.name}`;
+    if (b.logo) {
+      $$('.brand-logo').forEach((img) => {
+        img.onload = () => { img.hidden = false; img.closest('.logo-chip')?.classList.add('has-logo'); };
+        img.src = b.logo; img.alt = b.name;
+      });
+    }
+  } catch { /* se usan los valores por defecto */ }
+}
+
 // ===================== inicio =====================
 async function init() {
   try {
@@ -507,4 +566,5 @@ setInterval(() => {
   if (state.view === 'devices') loadDevices().catch(() => {});
   if (state.view === 'history') loadHistory().catch(() => {});
 }, 15000);
+loadBrand();
 init();

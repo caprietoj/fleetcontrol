@@ -8,6 +8,8 @@ const {
 } = require('./db');
 const cmds = require('./scripts/commands');
 const google = require('./google');
+const ipad = require('./ipad');
+const QRCode = require('qrcode');
 
 bootstrap();
 
@@ -53,6 +55,51 @@ app.get('/install/macos.sh', (req, res) => {
 app.get('/install/windows.ps1', (req, res) => {
   const t = fs.readFileSync(path.join(AGENTS_DIR, 'windows', 'install.ps1'), 'utf8');
   res.type('text/plain').send(t.replaceAll('__SERVER_URL__', serverUrl(req)));
+});
+
+// ---------- marca institucional ----------
+const hex = (v, d) => (/^#[0-9a-f]{6}$/i.test(v || '') ? v : d);
+const BRAND = {
+  name: process.env.BRAND_NAME || 'The Victoria School',
+  product: process.env.BRAND_PRODUCT || 'Gestión de equipos TI',
+  primary: hex(process.env.BRAND_PRIMARY, '#0b2a55'),
+  accent: hex(process.env.BRAND_ACCENT, '#1d5fb8'),
+  logo: process.env.BRAND_LOGO_URL ?? 'https://thevictoriaschool.edu.co/static/pix/logo-horizontal.a36e643498d0.png',
+  site: process.env.BRAND_SITE || 'https://thevictoriaschool.edu.co/',
+};
+app.get('/api/brand', (req, res) => res.json(BRAND));
+
+// ---------- inscripción de iPad (perfil OTA) ----------
+app.get('/enroll/ipad/:token', (req, res) => {
+  const token = getSetting('enrollment_token');
+  if (sha256(req.params.token) !== sha256(token)) {
+    return res.status(403).type('text/html').send('<meta name="viewport" content="width=device-width"><h2>Enlace de registro no válido o vencido.</h2><p>Pide a TI un código QR nuevo.</p>');
+  }
+  res.set('Content-Type', 'application/x-apple-aspen-config');
+  res.set('Content-Disposition', 'attachment; filename="registro-ipad.mobileconfig"');
+  res.send(ipad.enrollmentProfile({ serverUrl: serverUrl(req), token, orgName: BRAND.name }));
+});
+
+app.post('/enroll/ipad/profile-service', express.raw({ type: '*/*', limit: '256kb' }), (req, res) => {
+  const a = ipad.parseDeviceAttributes(req.body);
+  if (!a || !a.CHALLENGE || sha256(a.CHALLENGE) !== sha256(getSetting('enrollment_token'))) {
+    audit('ipad', 'enrolamiento_rechazado', a && a.SERIAL, null, clientIp(req));
+    return res.status(403).type('text/plain').send('Registro rechazado');
+  }
+  const serial = str(a.SERIAL, 40);
+  const udid = str(a.UDID, 80);
+  let row = db.prepare("SELECT id FROM devices WHERE platform = 'ipados' AND ((serial IS NOT NULL AND serial = ?) OR (udid IS NOT NULL AND udid = ?))").get(serial, udid);
+  const id = row ? row.id : crypto.randomUUID();
+  if (!row) {
+    db.prepare("INSERT INTO devices(id, token_hash, platform, enroll_method) VALUES(?,?, 'ipados', 'profile')").run(id, sha256(randomToken()));
+  }
+  const name = a.DEVICE_NAME && a.DEVICE_NAME !== 'iPad' ? a.DEVICE_NAME : `iPad ${serial || ''}`.trim();
+  db.prepare(`UPDATE devices SET hostname = ?, serial = ?, udid = ?, imei = ?, manufacturer = 'Apple', model = ?, os_version = ?,
+              status = 'active', enroll_method = 'profile', last_seen = ? WHERE id = ?`)
+    .run(str(name), serial, udid, str(a.IMEI, 40), ipad.modelName(a.PRODUCT), a.VERSION ? `iPadOS (build ${str(a.VERSION, 20)})` : null, nowSql(), id);
+  audit('ipad', row ? 'reenrolado' : 'enrolado', `${name} (${serial || 's/n'})`, { product: a.PRODUCT }, clientIp(req));
+  res.set('Content-Type', 'application/x-apple-aspen-config');
+  res.send(ipad.finalProfile({ orgName: BRAND.name, deviceId: id, supportUrl: BRAND.site }));
 });
 
 // =====================================================================
@@ -223,7 +270,7 @@ adminApi.get('/me', (req, res) => res.json({ username: req.admin.username }));
 // ---------- dispositivos ----------
 const ONLINE_SQL = `(d.last_seen IS NOT NULL AND (strftime('%s','now') - strftime('%s', d.last_seen)) < ${ONLINE_WINDOW_SEC})`;
 function deviceRow(d) {
-  return { ...d, token_hash: undefined, google_accounts: JSON.parse(d.google_accounts || '[]'), online: Boolean(d.online) };
+  return { ...d, token_hash: undefined, google_accounts: JSON.parse(d.google_accounts || '[]'), online: d.platform !== 'ipados' && Boolean(d.online) };
 }
 
 adminApi.get('/devices', (req, res) => {
@@ -249,6 +296,9 @@ adminApi.patch('/devices/:id', (req, res) => {
   const b = req.body || {};
   const g = b.google_email !== undefined ? String(b.google_email).trim().toLowerCase() : d.google_email;
   if (g && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(g)) throw new HttpError(400, 'Correo no válido');
+  if (d.platform === 'ipados' && b.assigned_to !== undefined) {
+    db.prepare('UPDATE devices SET logged_user = ? WHERE id = ?').run(String(b.assigned_to).trim().slice(0, 100) || null, d.id);
+  }
   db.prepare('UPDATE devices SET group_name = ?, notes = ?, google_email = ? WHERE id = ?').run(
     b.group_name !== undefined ? (String(b.group_name).trim().slice(0, 60) || null) : d.group_name,
     b.notes !== undefined ? String(b.notes).slice(0, 2000) : d.notes,
@@ -327,7 +377,7 @@ adminApi.post('/commands', wrap(async (req, res) => {
       insert.run(batch, d.id, type, prepared.summary, JSON.stringify(prepared.payload), null,
         r.ok ? 'success' : 'failed', r.output, actor(req), nowSql());
       r.ok ? result.done++ : result.failed++;
-      if (prepared.payload.clear_cookies) {
+      if (prepared.payload.clear_cookies && d.platform !== 'ipados') {
         const script = cmds.build('clean_browsers', cmds.GOOGLE_LOCAL_CLEANUP, d, ctx);
         insert.run(batch, d.id, 'clean_browsers', 'cookies, sesiones y cuentas · todos los navegadores (tras cierre de sesión Google)',
           JSON.stringify(cmds.GOOGLE_LOCAL_CLEANUP), script, 'pending', null, actor(req), null);
@@ -336,6 +386,13 @@ adminApi.post('/commands', wrap(async (req, res) => {
       continue;
     }
 
+    if (d.platform === 'ipados') {
+      insert.run(batch, d.id, type, prepared.summary, JSON.stringify(prepared.payload), null, 'skipped',
+        'Los iPad no ejecutan esta acción: requieren un MDM de Apple (certificado APNs). En iPad solo aplica "Cerrar sesiones de Google".',
+        actor(req), nowSql());
+      result.skipped++;
+      continue;
+    }
     const script = cmds.build(type, prepared.payload, d, ctx);
     if (!script) {
       insert.run(batch, d.id, type, prepared.summary, JSON.stringify(prepared.payload), null, 'skipped',
@@ -421,10 +478,13 @@ adminApi.post('/google/signout', wrap(async (req, res) => {
 }));
 
 // ---------- configuración ----------
-adminApi.get('/settings', (req, res) => {
+adminApi.get('/settings', wrap(async (req, res) => {
   const url = serverUrl(req);
   const token = getSetting('enrollment_token');
+  const ipadUrl = `${url}/enroll/ipad/${token}`;
   res.json({
+    enroll_ipad_url: ipadUrl,
+    enroll_ipad_qr: await QRCode.toString(ipadUrl, { type: 'svg', margin: 1, color: { dark: BRAND.primary, light: '#ffffff' } }),
     server_url: url,
     enrollment_token: token,
     install_macos: `curl -fsSL ${url}/install/macos.sh | sudo bash -s -- ${token}`,
@@ -435,6 +495,25 @@ adminApi.get('/settings', (req, res) => {
     agent_version: AGENT_VERSION,
     insecure: !url.startsWith('https://') && !/localhost|127\.0\.0\.1/.test(url),
   });
+}));
+
+// Registro manual de iPad (sin perfil)
+adminApi.post('/ipads', (req, res) => {
+  const b = req.body || {};
+  const serial = String(b.serial || '').trim().toUpperCase();
+  if (!/^[A-Z0-9]{8,14}$/.test(serial)) throw new HttpError(400, 'Número de serie no válido (8 a 14 letras y números)');
+  if (db.prepare("SELECT 1 FROM devices WHERE platform = 'ipados' AND serial = ?").get(serial)) throw new HttpError(400, 'Ya existe un iPad con ese número de serie');
+  const email = String(b.google_email || '').trim().toLowerCase();
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, 'Correo no válido');
+  const id = crypto.randomUUID();
+  db.prepare(`INSERT INTO devices(id, token_hash, platform, enroll_method, hostname, serial, manufacturer, model, os_version,
+              logged_user, google_email, group_name, notes, last_seen) VALUES(?,?,'ipados','manual',?,?,'Apple',?,?,?,?,?,?,NULL)`)
+    .run(id, sha256(randomToken()), String(b.name || `iPad ${serial}`).slice(0, 100), serial,
+      String(b.model || 'iPad (7.ª generación)').slice(0, 100), b.os_version ? `iPadOS ${String(b.os_version).slice(0, 20)}` : null,
+      String(b.assigned_to || '').slice(0, 100) || null, email || null, String(b.group_name || '').trim().slice(0, 60) || null,
+      String(b.notes || '').slice(0, 2000) || null);
+  audit(actor(req), 'ipad_registrado_manual', serial, null, clientIp(req));
+  res.json({ id });
 });
 adminApi.post('/settings/rotate-token', (req, res) => {
   setSetting('enrollment_token', randomToken(24));
@@ -477,7 +556,8 @@ adminApi.get('/audit', (req, res) => {
 adminApi.get('/stats', (req, res) => {
   const r = db.prepare(`SELECT
       COUNT(*) AS total,
-      SUM(CASE WHEN status != 'retired' AND ${ONLINE_SQL.replaceAll('d.', '')} THEN 1 ELSE 0 END) AS online,
+      SUM(CASE WHEN status != 'retired' AND platform != 'ipados' AND ${ONLINE_SQL.replaceAll('d.', '')} THEN 1 ELSE 0 END) AS online,
+      SUM(CASE WHEN platform = 'ipados' AND status != 'retired' THEN 1 ELSE 0 END) AS ipados,
       SUM(CASE WHEN platform = 'macos' AND status != 'retired' THEN 1 ELSE 0 END) AS macos,
       SUM(CASE WHEN platform = 'windows' AND status != 'retired' THEN 1 ELSE 0 END) AS windows
     FROM devices`).get();
