@@ -156,14 +156,15 @@
         </div>
         <div class="card">
           <h3>iPad (7.ª generación u otros, iPadOS 13 o superior)</h3>
+          <div class="dangerbox hidden" id="ipadHttpsWarn"><b>El registro de iPad necesita HTTPS.</b> Este panel se está usando con <code>http://</code>, así que el iPad mostrará “Ocurrió un error desconocido”. Publica el servidor con un dominio y HTTPS (Caddy lo hace automáticamente, ver README) o usa el registro manual de abajo.</div>
           <div class="ipad-enroll">
             <div class="qr" id="ipadQr"></div>
             <div>
               <ol class="steps">
                 <li>En el iPad, abre la <b>Cámara</b> y apunta a este código (o abre el enlace en <b>Safari</b>).</li>
-                <li>Toca <b>Permitir</b> para descargar el perfil.</li>
+                <li>Toca <b>Descargar perfil</b> y luego <b>Permitir</b>.</li>
                 <li>Ve a <b>Ajustes → Perfil descargado → Instalar</b> e ingresa el código del iPad.</li>
-                <li>El iPad aparece en <b>Dispositivos</b> con su número de serie y modelo.</li>
+                <li>Safari muestra “iPad registrado” y el equipo aparece en <b>Dispositivos</b>.</li>
               </ol>
               <div class="copy"><code id="cmdIpad"></code><button class="btn small" data-copy="cmdIpad">Copiar</button></div>
             </div>

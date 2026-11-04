@@ -70,9 +70,11 @@ powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https
 1. En el iPad, abre la **Cámara** y escanea el código QR, o abre el enlace en **Safari**.
 2. Toca **Permitir** para descargar el perfil.
 3. Ve a **Ajustes → Perfil descargado → Instalar** e ingresa el código del iPad.
-4. El iPad envía su número de serie, UDID y modelo (por ejemplo `iPad (7.ª generación) Wi-Fi (iPad7,11)`) y aparece en **Dispositivos**. Queda instalado el perfil "The Victoria School · Equipo registrado", con un acceso directo al sitio del colegio.
+4. El iPad envía su número de serie, UDID y modelo (por ejemplo `iPad (7.ª generación) Wi-Fi (iPad7,11)`), Safari muestra "iPad registrado" y el equipo aparece en **Dispositivos**. No queda ningún perfil instalado en el iPad.
 
-El registro por perfil **requiere HTTPS con un certificado válido**: iPadOS no instala perfiles servidos por `http://`. El perfil aparecerá como "No verificado" porque no está firmado; es normal.
+El registro por perfil **requiere HTTPS con un certificado válido**. Si el panel se usa con `http://IP:8080`, iPadOS muestra "Ocurrió un error desconocido" al instalar el perfil. Durante la instalación, el perfil aparece como "No verificado" porque no está firmado; es normal.
+
+**Si falla el registro**: en **Auditoría** aparece cada intento (`enrolado`, `enrolamiento_rechazado` o `enrolamiento_fallido`). Si no aparece nada, el iPad no llegó al servidor: revisa el HTTPS, el dominio y que el iPad tenga internet. Si el token se renovó después de descargar el perfil, borra el perfil descargado en *Ajustes → General → VPN y gestión de dispositivos* y escanea el QR nuevo.
 
 También puedes registrar iPad **a mano** (número de serie, asignado a, correo y grupo) en *Registrar equipos → Registrar un iPad manualmente*.
 

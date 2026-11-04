@@ -70,36 +70,100 @@ const BRAND = {
 app.get('/api/brand', (req, res) => res.json(BRAND));
 
 // ---------- inscripción de iPad (perfil OTA) ----------
-app.get('/enroll/ipad/:token', (req, res) => {
-  const token = getSetting('enrollment_token');
-  if (sha256(req.params.token) !== sha256(token)) {
-    return res.status(403).type('text/html').send('<meta name="viewport" content="width=device-width"><h2>Enlace de registro no válido o vencido.</h2><p>Pide a TI un código QR nuevo.</p>');
-  }
-  res.set('Content-Type', 'application/x-apple-aspen-config');
-  res.set('Content-Disposition', 'attachment; filename="registro-ipad.mobileconfig"');
-  res.send(ipad.enrollmentProfile({ serverUrl: serverUrl(req), token, orgName: BRAND.name }));
+// Flujo: QR → página /enroll/ipad/<token> → descarga del perfil "Profile Service" →
+// el iPad envía sus datos a /enroll/ipad/profile-service → el servidor responde con
+// una redirección 301 a una página de confirmación (método más compatible con iPadOS).
+function ipadPage(res, status, title, body, ok = false) {
+  const color = ok ? '#12805c' : status >= 400 ? '#c62828' : BRAND.primary;
+  res.status(status).type('text/html').send(`<!DOCTYPE html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(title)} · ${esc(BRAND.name)}</title>
+<style>body{margin:0;font-family:-apple-system,system-ui,sans-serif;background:#f4f5f7;color:#16181d}
+header{background:${BRAND.primary};color:#fff;padding:18px 22px;font-weight:700}
+main{max-width:560px;margin:22px auto;padding:0 18px}.card{background:#fff;border-radius:14px;padding:22px;border-top:5px solid ${color}}
+h1{font-size:22px;color:${color};margin:0 0 10px}ol{padding-left:20px;line-height:1.6}
+.btn{display:block;text-align:center;background:${BRAND.accent};color:#fff;text-decoration:none;padding:14px;border-radius:10px;font-weight:600;font-size:17px;margin:16px 0}
+.warn{background:#fdecec;border:1px solid #f5c2c2;color:#8e1b1b;padding:12px;border-radius:10px;font-size:14px}
+small{color:#6b7280}</style></head><body><header>${esc(BRAND.name)} · ${esc(BRAND.product)}</header>
+<main><div class="card"><h1>${esc(title)}</h1>${body}</div></main></body></html>`);
+}
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const tokenOk = (t) => typeof t === 'string' && sha256(t) === sha256(getSetting('enrollment_token'));
+const isHttps = (req) => serverUrl(req).startsWith('https://');
+
+app.get('/enroll/ipad/ok/:id', (req, res) => {
+  const d = db.prepare("SELECT hostname, serial, model FROM devices WHERE id = ? AND platform = 'ipados'").get(req.params.id);
+  if (!d) return ipadPage(res, 404, 'Registro no encontrado', '<p>Vuelve a escanear el código QR.</p>');
+  ipadPage(res, 200, '✓ iPad registrado', `<p>Este iPad quedó registrado en el inventario de TI.</p>
+    <p><b>Modelo:</b> ${esc(d.model)}<br><b>Número de serie:</b> ${esc(d.serial || '—')}</p>
+    <p><small>Ya puedes cerrar esta página. No queda ningún perfil instalado en el iPad.</small></p>`, true);
 });
 
-app.post('/enroll/ipad/profile-service', express.raw({ type: '*/*', limit: '256kb' }), (req, res) => {
-  const a = ipad.parseDeviceAttributes(req.body);
-  if (!a || !a.CHALLENGE || sha256(a.CHALLENGE) !== sha256(getSetting('enrollment_token'))) {
-    audit('ipad', 'enrolamiento_rechazado', a && a.SERIAL, null, clientIp(req));
-    return res.status(403).type('text/plain').send('Registro rechazado');
+app.get('/enroll/ipad/error', (req, res) => {
+  const reasons = {
+    token: 'El código QR ya no es válido (el token de registro fue renovado). Pide a TI un código nuevo y elimina el perfil descargado en Ajustes → General → VPN y gestión de dispositivos.',
+    datos: 'El iPad no envió sus datos en un formato reconocible.',
+    servidor: 'Ocurrió un error en el servidor al guardar el registro.',
+  };
+  ipadPage(res, 400, 'No se pudo registrar el iPad', `<p>${esc(reasons[req.query.motivo] || reasons.datos)}</p>`);
+});
+
+app.get('/enroll/ipad/:token', (req, res) => {
+  if (!tokenOk(req.params.token)) {
+    return ipadPage(res, 403, 'Enlace no válido o vencido', '<p>Pide a TI un código QR nuevo.</p>');
   }
-  const serial = str(a.SERIAL, 40);
-  const udid = str(a.UDID, 80);
-  let row = db.prepare("SELECT id FROM devices WHERE platform = 'ipados' AND ((serial IS NOT NULL AND serial = ?) OR (udid IS NOT NULL AND udid = ?))").get(serial, udid);
-  const id = row ? row.id : crypto.randomUUID();
-  if (!row) {
-    db.prepare("INSERT INTO devices(id, token_hash, platform, enroll_method) VALUES(?,?, 'ipados', 'profile')").run(id, sha256(randomToken()));
-  }
-  const name = a.DEVICE_NAME && a.DEVICE_NAME !== 'iPad' ? a.DEVICE_NAME : `iPad ${serial || ''}`.trim();
-  db.prepare(`UPDATE devices SET hostname = ?, serial = ?, udid = ?, imei = ?, manufacturer = 'Apple', model = ?, os_version = ?,
-              status = 'active', enroll_method = 'profile', last_seen = ? WHERE id = ?`)
-    .run(str(name), serial, udid, str(a.IMEI, 40), ipad.modelName(a.PRODUCT), a.VERSION ? `iPadOS (build ${str(a.VERSION, 20)})` : null, nowSql(), id);
-  audit('ipad', row ? 'reenrolado' : 'enrolado', `${name} (${serial || 's/n'})`, { product: a.PRODUCT }, clientIp(req));
+  const https = isHttps(req);
+  ipadPage(res, 200, 'Registrar este iPad', `
+    ${https ? '' : `<div class="warn"><b>Este servidor no usa HTTPS.</b> iPadOS mostrará “Ocurrió un error desconocido” al instalar el perfil.
+      TI debe publicar el panel con un dominio y certificado HTTPS (ver README) o registrar este iPad manualmente.</div>`}
+    <ol>
+      <li>Toca <b>Descargar perfil</b> y luego <b>Permitir</b>.</li>
+      <li>Abre <b>Ajustes</b> → <b>Perfil descargado</b> (arriba) → <b>Instalar</b> e ingresa el código del iPad.</li>
+      <li>Al terminar, Safari mostrará “iPad registrado”.</li>
+    </ol>
+    <a class="btn" href="/enroll/ipad/${esc(req.params.token)}/registro.mobileconfig">Descargar perfil</a>
+    <p><small>El perfil solo envía a TI el número de serie, el modelo, la versión de iPadOS y el identificador del equipo. No instala nada ni da control sobre el iPad.</small></p>`);
+});
+
+app.get('/enroll/ipad/:token/registro.mobileconfig', (req, res) => {
+  if (!tokenOk(req.params.token)) return ipadPage(res, 403, 'Enlace no válido o vencido', '<p>Pide a TI un código QR nuevo.</p>');
+  const xml = ipad.enrollmentProfile({ serverUrl: serverUrl(req), token: getSetting('enrollment_token'), orgName: BRAND.name });
   res.set('Content-Type', 'application/x-apple-aspen-config');
-  res.send(ipad.finalProfile({ orgName: BRAND.name, deviceId: id, supportUrl: BRAND.site }));
+  res.set('Content-Disposition', 'attachment; filename="registro-ipad.mobileconfig"');
+  res.set('Cache-Control', 'no-store');
+  res.end(Buffer.from(xml, 'utf8'));
+});
+
+app.post('/enroll/ipad/profile-service', express.raw({ type: () => true, limit: '512kb' }), (req, res) => {
+  const base = serverUrl(req);
+  const bytes = Buffer.isBuffer(req.body) ? req.body.length : 0;
+  const a = ipad.parseDeviceAttributes(req.body);
+  console.log(`[ipad] solicitud de ${clientIp(req)}: ${bytes} bytes, content-type=${req.get('content-type')}, atributos=${a ? Object.keys(a).join(',') : 'ninguno'}`);
+  if (!a || !(a.SERIAL || a.UDID)) {
+    audit('ipad', 'enrolamiento_fallido', null, { motivo: 'datos', bytes, contentType: req.get('content-type') }, clientIp(req));
+    return res.redirect(301, `${base}/enroll/ipad/error?motivo=datos`);
+  }
+  if (!tokenOk(a.CHALLENGE)) {
+    audit('ipad', 'enrolamiento_rechazado', a.SERIAL, { motivo: 'token' }, clientIp(req));
+    return res.redirect(301, `${base}/enroll/ipad/error?motivo=token`);
+  }
+  try {
+    const serial = str(a.SERIAL, 40);
+    const udid = str(a.UDID, 80);
+    const row = db.prepare("SELECT id FROM devices WHERE platform = 'ipados' AND ((serial IS NOT NULL AND serial = ?) OR (udid IS NOT NULL AND udid = ?))").get(serial, udid);
+    const id = row ? row.id : crypto.randomUUID();
+    if (!row) {
+      db.prepare("INSERT INTO devices(id, token_hash, platform, enroll_method) VALUES(?,?, 'ipados', 'profile')").run(id, sha256(randomToken()));
+    }
+    const name = a.DEVICE_NAME && a.DEVICE_NAME !== 'iPad' ? a.DEVICE_NAME : `iPad ${serial || ''}`.trim();
+    db.prepare(`UPDATE devices SET hostname = COALESCE(hostname, ?), serial = ?, udid = ?, imei = ?, manufacturer = 'Apple', model = ?, os_version = ?,
+                status = 'active', enroll_method = 'profile', last_seen = ? WHERE id = ?`)
+      .run(str(name), serial, udid, str(a.IMEI, 40) || null, ipad.modelName(a.PRODUCT), a.VERSION ? `iPadOS (build ${str(a.VERSION, 20)})` : null, nowSql(), id);
+    audit('ipad', row ? 'reenrolado' : 'enrolado', `${name} (${serial || 's/n'})`, { product: a.PRODUCT }, clientIp(req));
+    res.redirect(301, `${base}/enroll/ipad/ok/${id}`);
+  } catch (e) {
+    console.error('[ipad] error guardando registro', e);
+    res.redirect(301, `${base}/enroll/ipad/error?motivo=servidor`);
+  }
 });
 
 // =====================================================================

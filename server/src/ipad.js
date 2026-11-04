@@ -2,7 +2,8 @@
 // Registro de iPad mediante el "Profile Service" de Apple (inscripción por perfil OTA).
 // 1) El iPad abre en Safari /enroll/ipad/<token> y descarga un perfil de tipo "Profile Service".
 // 2) Al instalarlo, iPadOS envía (POST, plist firmado) su UDID, número de serie, modelo y versión.
-// 3) El servidor registra el equipo y responde con un perfil final que queda instalado como marca.
+// 3) El servidor registra el equipo y redirige (301) a una página de confirmación en Safari.
+//    No queda ningún perfil instalado en el iPad.
 // No requiere certificados de Apple; las acciones remotas sobre el iPad (borrar, instalar apps)
 // necesitan un MDM de Apple con certificado APNs (ver README).
 const crypto = require('node:crypto');
@@ -63,34 +64,6 @@ function enrollmentProfile({ serverUrl, token, orgName }) {
 </dict>`);
 }
 
-/** Perfil final que queda instalado: un acceso directo al sitio de soporte del colegio. */
-function finalProfile({ orgName, deviceId, supportUrl }) {
-  const id = 'co.edu.fleetcontrol.registered';
-  return plist(`<dict>
-  <key>PayloadContent</key>
-  <array>
-    <dict>
-      <key>PayloadType</key><string>com.apple.webClip.managed</string>
-      <key>PayloadVersion</key><integer>1</integer>
-      <key>PayloadIdentifier</key><string>${id}.webclip</string>
-      <key>PayloadUUID</key><string>${uuidFrom(id + 'webclip' + deviceId)}</string>
-      <key>PayloadDisplayName</key><string>Acceso directo</string>
-      <key>Label</key><string>${xmlEsc(orgName)}</string>
-      <key>URL</key><string>${xmlEsc(supportUrl)}</string>
-      <key>IsRemovable</key><true/>
-      <key>FullScreen</key><false/>
-    </dict>
-  </array>
-  <key>PayloadOrganization</key><string>${xmlEsc(orgName)}</string>
-  <key>PayloadDisplayName</key><string>${xmlEsc(orgName)} · Equipo registrado</string>
-  <key>PayloadDescription</key><string>Este iPad está registrado en el inventario de TI (ID ${xmlEsc(deviceId)}).</string>
-  <key>PayloadIdentifier</key><string>${id}</string>
-  <key>PayloadUUID</key><string>${uuidFrom(id + deviceId)}</string>
-  <key>PayloadType</key><string>Configuration</string>
-  <key>PayloadVersion</key><integer>1</integer>
-</dict>`);
-}
-
 /** Extrae el diccionario <key>/<string> del plist que viene dentro del PKCS#7 firmado. */
 function parseDeviceAttributes(buf) {
   const text = Buffer.isBuffer(buf) ? buf.toString('latin1') : String(buf || '');
@@ -106,4 +79,4 @@ function parseDeviceAttributes(buf) {
   return out;
 }
 
-module.exports = { enrollmentProfile, finalProfile, parseDeviceAttributes, modelName };
+module.exports = { enrollmentProfile, parseDeviceAttributes, modelName };

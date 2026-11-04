@@ -486,6 +486,7 @@ function loadEnroll() {
   $('#cmdWin').textContent = s.install_windows;
   $('#cmdIpad').textContent = s.enroll_ipad_url;
   $('#ipadQr').innerHTML = s.enroll_ipad_qr;
+  $('#ipadHttpsWarn').classList.toggle('hidden', s.enroll_ipad_url.startsWith('https://'));
   $('#enrollToken').textContent = s.enrollment_token;
 }
 $('#rotateBtn').addEventListener('click', async () => {
