@@ -8,6 +8,7 @@ FleetControl es una plataforma propia para registrar y administrar portátiles *
 - **Eliminación de archivos**: Descargas, Escritorio, Documentos, Papelera, temporales o rutas propias con comodines.
 - **Instalación masiva de software**: `.pkg`, `.dmg` y `.zip` en Mac; `winget`, `.msi` y `.exe` en Windows. También desinstalación e inventario de software.
 - Scripts remotos, mensajes al usuario, reinicio y apagado.
+- **Cola de acciones**: ver todo lo pendiente o en ejecución en un solo lugar, cancelar varias acciones a la vez, vaciar la cola de un equipo y reintentar una acción que falló.
 - Varios administradores, historial con la salida de cada acción y un registro de auditoría.
 
 ## Cómo funciona

@@ -31,6 +31,7 @@
         <a data-view="devices" class="active">Dispositivos</a>
         <a data-view="software">Catálogo de software</a>
         <a data-view="history">Historial de acciones</a>
+        <a data-view="queue">Cola de acciones</a>
         <a data-view="google">Google Workspace</a>
         <a data-view="enroll">Registrar equipos</a>
         <a data-view="settings">Administradores</a>
@@ -113,6 +114,28 @@
         </form>
         <div class="table-wrap">
           <table class="table" id="pkgTable"><thead><tr><th>Nombre</th><th>Plataforma</th><th>Tipo</th><th>Origen</th><th></th></tr></thead><tbody></tbody></table>
+        </div>
+      </section>
+
+      <!-- Cola -->
+      <section data-view="queue" class="view hidden">
+        <header class="view-head">
+          <h1>Cola de acciones</h1>
+          <span class="muted" id="queueCount"></span>
+        </header>
+        <div id="queueBulkBar" class="bulkbar disabled">
+          <span id="queueSelCount">0 seleccionadas</span>
+          <div class="actions">
+            <button class="btn danger-outline" id="queueCancelSel">Cancelar seleccionadas</button>
+            <button class="btn danger-outline" id="queueCancelAll">Cancelar toda la cola</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="table clickable" id="queueTable">
+            <thead><tr><th class="chk"><input type="checkbox" id="queueSelAll"></th><th>Equipo</th><th>Acción</th><th>Detalle</th><th>Estado</th><th>Por</th><th>En cola desde</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <p id="queueEmpty" class="empty hidden">No hay acciones en cola. Todo al día.</p>
         </div>
       </section>
 

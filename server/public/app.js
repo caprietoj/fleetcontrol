@@ -85,7 +85,7 @@ function go(view) {
   state.view = view;
   $$('.sidebar nav a').forEach((a) => a.classList.toggle('active', a.dataset.view === view));
   $$('main .view').forEach((v) => v.classList.toggle('hidden', v.dataset.view !== view));
-  ({ devices: loadDevices, software: loadPackages, history: loadHistory, google: loadGoogle, enroll: loadEnroll, settings: loadAdmins, audit: loadAudit }[view] || (() => {}))();
+  ({ devices: loadDevices, software: loadPackages, history: loadHistory, queue: loadQueue, google: loadGoogle, enroll: loadEnroll, settings: loadAdmins, audit: loadAudit }[view] || (() => {}))();
 }
 document.addEventListener('click', (e) => {
   const nav = e.target.closest('[data-view]');
@@ -224,6 +224,7 @@ async function openDevice(id) {
       <label>Notas<textarea name="notes" rows="2">${esc(d.notes || '')}</textarea></label>
       <div class="modal-actions">
         <button type="button" class="btn danger-outline" id="delDev">Quitar del panel</button>
+        ${d.pending ? `<button type="button" class="btn danger-outline" id="clearQueueDev">Vaciar cola (${d.pending})</button>` : ''}
         <button class="btn primary" type="submit">Guardar</button>
       </div>
     </form>
@@ -242,6 +243,14 @@ async function openDevice(id) {
     try {
       await api('/devices/' + d.id, { method: 'PATCH', body: Object.fromEntries(f) });
       toast('Guardado'); loadDevices();
+    } catch (err) { toast(err.message, true); }
+  });
+  const clearQ = $('#clearQueueDev');
+  if (clearQ) clearQ.addEventListener('click', async () => {
+    if (!confirm(`¿Cancelar las ${d.pending} acciones pendientes de ${d.hostname}?`)) return;
+    try {
+      const r = await api(`/devices/${d.id}/clear-queue`, { method: 'POST', body: {} });
+      toast(`${r.cancelled} acción(es) cancelada(s)`); openDevice(d.id); loadDevices();
     } catch (err) { toast(err.message, true); }
   });
   $('#delDev').addEventListener('click', async () => {
@@ -388,6 +397,76 @@ async function openAction(type, ids) {
   });
 }
 
+// ===================== cola de acciones =====================
+state.queueSelected = state.queueSelected || new Set();
+
+async function loadQueue() {
+  const rows = await api('/queue');
+  state.queueRows = rows;
+  const ids = new Set(rows.map((r) => r.id));
+  state.queueSelected.forEach((id) => { if (!ids.has(id)) state.queueSelected.delete(id); });
+  $('#queueCount').textContent = rows.length ? `${rows.length} en cola` : '';
+  $('#queueEmpty').classList.toggle('hidden', rows.length > 0);
+  $('#queueTable tbody').innerHTML = rows.map((c) => `<tr data-id="${c.id}">
+    <td class="chk">${c.status === 'pending' ? `<input type="checkbox" ${state.queueSelected.has(c.id) ? 'checked' : ''}>` : ''}</td>
+    <td><b>${esc(c.hostname || '(eliminado)')}</b>${c.platform ? ' ' + platTag(c.platform) : ''}${c.device_status === 'retired' ? ' <span class="tag">retirado</span>' : (!c.device_online && c.platform !== 'ipados' ? '<div class="sub">desconectado: esperando a que se conecte</div>' : '')}</td>
+    <td>${esc(state.settings.types[c.type] || c.type)}</td>
+    <td class="sub">${esc(c.summary || '')}</td>
+    <td>${stBadge(c.status)}</td>
+    <td>${esc(c.created_by || '')}</td>
+    <td class="sub">${ago(c.created_at)}</td>
+  </tr>`).join('');
+  updateQueueSelection();
+}
+function updateQueueSelection() {
+  const n = state.queueSelected.size;
+  $('#queueSelCount').textContent = n ? `${n} seleccionada${n > 1 ? 's' : ''}` : '0 seleccionadas';
+  $('#queueBulkBar').classList.toggle('disabled', n === 0);
+  const pendingRows = (state.queueRows || []).filter((r) => r.status === 'pending');
+  $('#queueSelAll').checked = pendingRows.length > 0 && pendingRows.every((r) => state.queueSelected.has(r.id));
+  $('#queueCancelAll').disabled = !(state.queueRows || []).some((r) => r.status === 'pending');
+}
+$('#queueSelAll').addEventListener('change', (e) => {
+  (state.queueRows || []).filter((r) => r.status === 'pending').forEach((r) => (e.target.checked ? state.queueSelected.add(r.id) : state.queueSelected.delete(r.id)));
+  renderQueueChecks();
+});
+function renderQueueChecks() {
+  $$('#queueTable tbody tr').forEach((tr) => {
+    const cb = $('input[type=checkbox]', tr);
+    if (cb) cb.checked = state.queueSelected.has(Number(tr.dataset.id));
+  });
+  updateQueueSelection();
+}
+$('#queueTable tbody').addEventListener('click', (e) => {
+  const tr = e.target.closest('tr'); if (!tr) return;
+  const id = Number(tr.dataset.id);
+  if (e.target.closest('td.chk')) {
+    const cb = $('input', tr); if (!cb) return;
+    if (e.target !== cb) cb.checked = !cb.checked;
+    cb.checked ? state.queueSelected.add(id) : state.queueSelected.delete(id);
+    updateQueueSelection();
+    return;
+  }
+  openCommand(id);
+});
+$('#queueCancelSel').addEventListener('click', async () => {
+  const ids = [...state.queueSelected]; if (!ids.length) return;
+  if (!confirm(`¿Cancelar ${ids.length} acción(es) pendiente(s)?`)) return;
+  try {
+    const r = await api('/commands/cancel-bulk', { method: 'POST', body: { ids } });
+    toast(`${r.cancelled} cancelada(s)`); state.queueSelected.clear(); loadQueue(); loadDevices();
+  } catch (err) { toast(err.message, true); }
+});
+$('#queueCancelAll').addEventListener('click', async () => {
+  const ids = (state.queueRows || []).filter((r) => r.status === 'pending').map((r) => r.id);
+  if (!ids.length) return;
+  if (!confirm(`¿Cancelar las ${ids.length} acciones pendientes de toda la cola?`)) return;
+  try {
+    const r = await api('/commands/cancel-bulk', { method: 'POST', body: { ids } });
+    toast(`${r.cancelled} cancelada(s)`); state.queueSelected.clear(); loadQueue(); loadDevices();
+  } catch (err) { toast(err.message, true); }
+});
+
 // ===================== historial =====================
 async function loadHistory() {
   const st = $('#hStatus').value;
@@ -409,13 +488,25 @@ async function openCommand(id) {
       <dt>Código de salida</dt><dd>${c.exit_code ?? '—'}</dd></dl>
     <h3>Resultado</h3><pre class="output">${esc(c.output || (c.status === 'pending' ? 'Esperando a que el equipo se conecte…' : '(sin salida)'))}</pre>
     ${c.script ? `<details><summary>Ver script ejecutado</summary><pre class="output">${esc(c.script)}</pre></details>` : ''}
-    <div class="modal-actions">${c.status === 'pending' ? '<button class="btn danger-outline" id="cancelCmd">Cancelar</button>' : ''}
+    <div class="modal-actions">
+      ${['failed', 'cancelled', 'skipped'].includes(c.status) ? '<button class="btn" id="retryCmd">Reintentar</button>' : ''}
+      ${c.status === 'pending' ? '<button class="btn danger-outline" id="cancelCmd">Cancelar</button>' : ''}
       <button class="btn" data-close="modal">Cerrar</button></div>`;
   $('#modal').classList.remove('hidden');
+  const refreshCurrent = () => { if (state.view === 'history') loadHistory(); if (state.view === 'queue') loadQueue(); loadDevices(); };
   const cb = $('#cancelCmd');
   if (cb) cb.addEventListener('click', async () => {
-    try { await api(`/commands/${id}/cancel`, { method: 'POST', body: {} }); toast('Cancelado'); $('#modal').classList.add('hidden'); if (state.view === 'history') loadHistory(); }
+    try { await api(`/commands/${id}/cancel`, { method: 'POST', body: {} }); toast('Cancelado'); $('#modal').classList.add('hidden'); refreshCurrent(); }
     catch (err) { toast(err.message, true); }
+  });
+  const rb = $('#retryCmd');
+  if (rb) rb.addEventListener('click', async () => {
+    rb.disabled = true;
+    try {
+      const r = await api(`/commands/${id}/retry`, { method: 'POST', body: {} });
+      toast(r.status === 'pending' ? 'Reenviado: quedó en cola' : r.status === 'success' ? 'Reintentado: correcto' : 'Reintentado: falló de nuevo', r.status === 'failed');
+      $('#modal').classList.add('hidden'); refreshCurrent();
+    } catch (err) { toast(err.message, true); rb.disabled = false; }
   });
 }
 
@@ -584,6 +675,7 @@ setInterval(() => {
   if ($('#app').classList.contains('hidden') || document.hidden) return;
   if (state.view === 'devices') loadDevices().catch(() => {});
   if (state.view === 'history') loadHistory().catch(() => {});
+  if (state.view === 'queue') loadQueue().catch(() => {});
 }, 15000);
 loadBrand();
 init();

@@ -513,6 +513,63 @@ adminApi.post('/commands/:id/cancel', (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- cola de acciones ----------
+// "En cola" = pendientes (esperando a que el equipo se conecte) o en ejecución ahora mismo.
+adminApi.get('/queue', (req, res) => {
+  const rows = db.prepare(`SELECT c.id, c.batch_id, c.device_id, c.type, c.summary, c.status, c.created_by,
+      c.created_at, c.sent_at, d.hostname, d.platform, d.status AS device_status,
+      ${ONLINE_SQL} AS device_online
+    FROM commands c LEFT JOIN devices d ON d.id = c.device_id
+    WHERE c.status IN ('pending','running') ORDER BY c.id ASC LIMIT 500`).all();
+  res.json(rows);
+});
+
+adminApi.post('/commands/cancel-bulk', (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? [...new Set(req.body.ids)].map((x) => parseInt(x, 10)).filter(Number.isInteger) : [];
+  if (!ids.length) throw new HttpError(400, 'No se indicaron acciones');
+  const stmt = db.prepare("UPDATE commands SET status = 'cancelled', finished_at = ? WHERE id = ? AND status = 'pending'");
+  const now = nowSql();
+  let cancelled = 0;
+  for (const id of ids) cancelled += stmt.run(now, id).changes;
+  audit(actor(req), 'cola_cancelada_varias', `${cancelled} de ${ids.length}`, { ids }, clientIp(req));
+  res.json({ cancelled, skipped: ids.length - cancelled });
+});
+
+adminApi.post('/devices/:id/clear-queue', (req, res) => {
+  const d = db.prepare('SELECT * FROM devices WHERE id = ?').get(req.params.id);
+  if (!d) throw new HttpError(404, 'Dispositivo no encontrado');
+  const r = db.prepare("UPDATE commands SET status = 'cancelled', finished_at = ? WHERE device_id = ? AND status = 'pending'")
+    .run(nowSql(), d.id);
+  audit(actor(req), 'cola_vaciada', d.hostname, { cancelled: r.changes }, clientIp(req));
+  res.json({ cancelled: r.changes });
+});
+
+adminApi.post('/commands/:id/retry', wrap(async (req, res) => {
+  const c = db.prepare('SELECT * FROM commands WHERE id = ?').get(parseInt(req.params.id, 10));
+  if (!c) throw new HttpError(404, 'Comando no encontrado');
+  if (!['failed', 'cancelled', 'skipped'].includes(c.status)) throw new HttpError(400, 'Solo se pueden reintentar acciones que fallaron, se cancelaron u omitieron');
+  const d = db.prepare('SELECT * FROM devices WHERE id = ?').get(c.device_id);
+  if (!d || d.status === 'retired') throw new HttpError(400, 'El equipo ya no está disponible');
+  const payload = JSON.parse(c.payload || '{}');
+  const batch = randomToken(8);
+  const ctx = { serverUrl: serverUrl(req) };
+  const insert = db.prepare(`INSERT INTO commands(batch_id, device_id, type, summary, payload, script, status, output, created_by, finished_at)
+                             VALUES(?,?,?,?,?,?,?,?,?,?)`);
+
+  if (c.type === 'google_signout') {
+    const r = await googleSignoutForDevice(d, payload);
+    insert.run(batch, d.id, c.type, c.summary, c.payload, null, r.ok ? 'success' : 'failed', r.output, actor(req), nowSql());
+    audit(actor(req), 'comando_reintentado', d.hostname, { original: c.id }, clientIp(req));
+    return res.json({ ok: true, status: r.ok ? 'success' : 'failed' });
+  }
+  if (d.platform === 'ipados') throw new HttpError(400, 'Esta acción no aplica a iPad');
+  const script = cmds.build(c.type, payload, d, ctx);
+  if (!script) throw new HttpError(400, `No hay nada que ejecutar para ${d.platform === 'macos' ? 'macOS' : 'Windows'} en esta acción`);
+  const info = insert.run(batch, d.id, c.type, c.summary, c.payload, script, 'pending', null, actor(req), null);
+  audit(actor(req), 'comando_reintentado', d.hostname, { original: c.id, nuevo: Number(info.lastInsertRowid) }, clientIp(req));
+  res.json({ ok: true, status: 'pending', id: Number(info.lastInsertRowid) });
+}));
+
 // ---------- catálogo de software ----------
 const KINDS = { macos: ['pkg', 'dmg', 'zip'], windows: ['msi', 'exe', 'winget'] };
 adminApi.get('/packages', (req, res) => res.json(db.prepare('SELECT * FROM packages ORDER BY platform, name COLLATE NOCASE').all()));
