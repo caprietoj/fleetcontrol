@@ -115,17 +115,25 @@ async function listOrgUnits() {
     .sort((a, b) => a.orgUnitPath.localeCompare(b.orgUnitPath));
 }
 
-/** Lista los usuarios de una unidad organizativa (no incluye subunidades hijas por separado: Google las junta igual). */
+const normPath = (p) => String(p || '').replace(/\/+$/, '') || '/';
+// Users.list no tiene un parámetro "orgUnitPath" propio: el filtro va dentro de "query",
+// con su propio lenguaje de búsqueda. Los valores con espacios deben ir entre comillas.
+const quoteQueryValue = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+
+/** Lista los usuarios de una unidad organizativa exacta (no incluye subunidades hijas). */
 async function listUsersInOrgUnit(orgUnitPath) {
   const users = [];
   let pageToken = '';
   do {
     const qs = new URLSearchParams({
-      customer: 'my_customer', orgUnitPath, maxResults: '200', projection: 'basic', orderBy: 'email',
+      customer: 'my_customer', maxResults: '200', projection: 'basic', orderBy: 'email',
+      query: `orgUnitPath=${quoteQueryValue(orgUnitPath)}`,
     });
     if (pageToken) qs.set('pageToken', pageToken);
     const data = await api('GET', `${DIR}/users?${qs}`);
     for (const u of (data && data.users) || []) {
+      // Red de seguridad: si Google devolviera algo fuera de la unidad, se descarta aquí.
+      if (u.orgUnitPath && normPath(u.orgUnitPath) !== normPath(orgUnitPath)) continue;
       users.push({ email: u.primaryEmail, name: (u.name && u.name.fullName) || u.primaryEmail, suspended: Boolean(u.suspended) });
     }
     pageToken = (data && data.nextPageToken) || '';
