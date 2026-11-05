@@ -8,6 +8,8 @@ const crypto = require('node:crypto');
 
 const SCOPES = [
   'https://www.googleapis.com/auth/admin.directory.user.security',
+  'https://www.googleapis.com/auth/admin.directory.user.readonly',
+  'https://www.googleapis.com/auth/admin.directory.orgunit.readonly',
 ];
 
 let cachedKey = null;
@@ -102,4 +104,33 @@ async function revokeTokens(email) {
   return items.length;
 }
 
-module.exports = { status, signOut, revokeTokens, isManagedEmail };
+const DIR = 'https://admin.googleapis.com/admin/directory/v1';
+
+/** Lista las unidades organizativas de Google Workspace (p. ej. "Estudiantes TVS"). */
+async function listOrgUnits() {
+  const data = await api('GET', `${DIR}/customer/my_customer/orgunits?type=all`);
+  const items = (data && data.organizationUnits) || [];
+  return items
+    .map((o) => ({ orgUnitPath: o.orgUnitPath, name: o.name, parentOrgUnitPath: o.parentOrgUnitPath || null }))
+    .sort((a, b) => a.orgUnitPath.localeCompare(b.orgUnitPath));
+}
+
+/** Lista los usuarios de una unidad organizativa (no incluye subunidades hijas por separado: Google las junta igual). */
+async function listUsersInOrgUnit(orgUnitPath) {
+  const users = [];
+  let pageToken = '';
+  do {
+    const qs = new URLSearchParams({
+      customer: 'my_customer', orgUnitPath, maxResults: '200', projection: 'basic', orderBy: 'email',
+    });
+    if (pageToken) qs.set('pageToken', pageToken);
+    const data = await api('GET', `${DIR}/users?${qs}`);
+    for (const u of (data && data.users) || []) {
+      users.push({ email: u.primaryEmail, name: (u.name && u.name.fullName) || u.primaryEmail, suspended: Boolean(u.suspended) });
+    }
+    pageToken = (data && data.nextPageToken) || '';
+  } while (pageToken);
+  return users;
+}
+
+module.exports = { status, signOut, revokeTokens, isManagedEmail, listOrgUnits, listUsersInOrgUnit };

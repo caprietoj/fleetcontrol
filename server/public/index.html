@@ -153,6 +153,15 @@
       <section data-view="google" class="view hidden">
         <header class="view-head"><h1>Google Workspace</h1></header>
         <div class="card" id="googleStatus"></div>
+        <div class="card" id="orgSignoutCard">
+          <h3>Cerrar sesiones por unidad organizativa</h3>
+          <p class="muted">Trae todos los usuarios de una unidad (por ejemplo <b>Estudiantes TVS</b>) y cierra sus sesiones de Google de una sola vez. Útil para los iPad que se prestan: no hay que saber qué correo usó cada estudiante.</p>
+          <label>Unidad organizativa<select id="orgUnitSelect"><option value="">Selecciona…</option></select></label>
+          <p class="hint" id="orgUnitInfo"></p>
+          <label class="check"><input type="checkbox" id="orgRevoke"> También revocar accesos de aplicaciones de terceros (OAuth)</label>
+          <div class="form-actions"><button class="btn danger-outline" id="orgSignoutBtn" disabled type="button">Cerrar sesiones</button></div>
+          <pre id="orgSignoutOut" class="output hidden"></pre>
+        </div>
         <form id="googleForm" class="card">
           <h3>Cerrar sesiones por correo</h3>
           <p class="muted">Cierra todas las sesiones de estas cuentas en cualquier equipo, navegador y móvil (no depende del agente).</p>

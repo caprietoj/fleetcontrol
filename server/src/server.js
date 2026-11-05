@@ -611,6 +611,61 @@ adminApi.post('/google/signout', wrap(async (req, res) => {
   res.json(r);
 }));
 
+// ---------- cierre de sesión masivo por unidad organizativa ----------
+const ORG_SIGNOUT_LIMIT = 3000; // tope de seguridad por ejecución
+adminApi.get('/google/orgunits', wrap(async (req, res) => {
+  if (!google.status().configured) throw new HttpError(400, 'Google Workspace no está configurado. Ver README, sección 3.');
+  try {
+    res.json(await google.listOrgUnits());
+  } catch (e) {
+    throw new HttpError(400, `No se pudo leer las unidades organizativas: ${e.message} (revisa que el alcance admin.directory.orgunit.readonly esté autorizado).`);
+  }
+}));
+
+adminApi.get('/google/orgunits/users', wrap(async (req, res) => {
+  if (!google.status().configured) throw new HttpError(400, 'Google Workspace no está configurado. Ver README, sección 3.');
+  const orgUnitPath = String(req.query.path || '').trim();
+  if (!orgUnitPath) throw new HttpError(400, 'Falta la unidad organizativa');
+  try {
+    const users = await google.listUsersInOrgUnit(orgUnitPath);
+    res.json({ count: users.length, users: users.slice(0, 20) });
+  } catch (e) {
+    throw new HttpError(400, `No se pudo leer los usuarios: ${e.message} (revisa que el alcance admin.directory.user.readonly esté autorizado).`);
+  }
+}));
+
+adminApi.post('/google/orgunits/signout', wrap(async (req, res) => {
+  if (!google.status().configured) throw new HttpError(400, 'Google Workspace no está configurado. Ver README, sección 3.');
+  const orgUnitPath = String(req.body.orgUnitPath || '').trim();
+  if (!orgUnitPath) throw new HttpError(400, 'Falta la unidad organizativa');
+  const revokeTokens = Boolean(req.body.revoke_tokens);
+
+  let users;
+  try { users = await google.listUsersInOrgUnit(orgUnitPath); }
+  catch (e) { throw new HttpError(400, `No se pudo leer los usuarios de "${orgUnitPath}": ${e.message}`); }
+  if (!users.length) throw new HttpError(400, `La unidad "${orgUnitPath}" no tiene usuarios.`);
+  if (users.length > ORG_SIGNOUT_LIMIT) throw new HttpError(400, `La unidad tiene ${users.length} usuarios; el máximo por ejecución es ${ORG_SIGNOUT_LIMIT}.`);
+
+  const results = { total: users.length, ok: 0, failed: 0, failedEmails: [] };
+  const CONCURRENCY = 8;
+  for (let i = 0; i < users.length; i += CONCURRENCY) {
+    const chunk = users.slice(i, i + CONCURRENCY);
+    await Promise.all(chunk.map(async (u) => {
+      try {
+        await google.signOut(u.email);
+        if (revokeTokens) await google.revokeTokens(u.email);
+        results.ok++;
+      } catch (e) {
+        results.failed++;
+        results.failedEmails.push(`${u.email}: ${e.message}`);
+      }
+    }));
+  }
+  audit(actor(req), 'google_signout_org', `${orgUnitPath} (${users.length} usuarios)`,
+    { ok: results.ok, failed: results.failed, revokeTokens }, clientIp(req));
+  res.json(results);
+}));
+
 // ---------- configuración ----------
 adminApi.get('/settings', wrap(async (req, res) => {
   const url = serverUrl(req);

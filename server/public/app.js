@@ -552,13 +552,63 @@ $('#pkgTable').addEventListener('click', async (e) => {
 });
 
 // ===================== Google =====================
+state.orgUnits = state.orgUnits || [];
 function loadGoogle() {
   const g = state.settings.google;
   $('#googleStatus').innerHTML = g.configured
     ? `<h3>✅ Conectado</h3><dl class="kv"><dt>Cuenta de servicio</dt><dd>${esc(g.serviceAccount)}</dd><dt>Administrador</dt><dd>${esc(g.adminEmail)}</dd>
        <dt>Dominios</dt><dd>${g.domains.length ? g.domains.map(esc).join(', ') : 'todos'}</dd></dl>`
     : `<h3>⚠️ No configurado</h3><p class="muted">${esc(g.error || '')} Para cerrar sesiones de Google de forma remota, configura una cuenta de servicio con delegación de dominio (pasos en el README) y define GOOGLE_SA_KEY_FILE y GOOGLE_ADMIN_EMAIL en el servidor.</p>`;
+  $('#orgSignoutCard').classList.toggle('hidden', !g.configured);
+  if (g.configured) loadOrgUnits();
 }
+
+async function loadOrgUnits() {
+  const sel = $('#orgUnitSelect');
+  sel.innerHTML = '<option value="">Cargando…</option>';
+  try {
+    state.orgUnits = await api('/google/orgunits');
+    sel.innerHTML = '<option value="">Selecciona…</option>' +
+      state.orgUnits.map((o) => `<option value="${esc(o.orgUnitPath)}">${esc(o.name)} — ${esc(o.orgUnitPath)}</option>`).join('');
+  } catch (err) {
+    sel.innerHTML = '<option value="">No se pudieron cargar</option>';
+    $('#orgUnitInfo').textContent = err.message;
+  }
+}
+$('#orgUnitSelect').addEventListener('change', async (e) => {
+  const path = e.target.value;
+  const info = $('#orgUnitInfo'); const btn = $('#orgSignoutBtn');
+  btn.disabled = true; $('#orgSignoutOut').classList.add('hidden');
+  if (!path) { info.textContent = ''; return; }
+  info.textContent = 'Consultando usuarios…';
+  try {
+    const r = await api('/google/orgunits/users?path=' + encodeURIComponent(path));
+    info.innerHTML = r.count
+      ? `<b>${r.count} usuario(s)</b> en esta unidad. Ejemplo: ${r.users.slice(0, 3).map((u) => esc(u.email)).join(', ')}${r.count > 3 ? '…' : ''}`
+      : 'Esta unidad no tiene usuarios.';
+    btn.disabled = r.count === 0;
+    btn.dataset.count = r.count;
+  } catch (err) { info.textContent = err.message; }
+});
+$('#orgSignoutBtn').addEventListener('click', async (e) => {
+  const sel = $('#orgUnitSelect');
+  const path = sel.value; if (!path) return;
+  const name = sel.options[sel.selectedIndex].text.split(' — ')[0];
+  const count = e.target.dataset.count || '?';
+  const typed = prompt(`Esto cerrará la sesión de Google de los ${count} usuarios de "${name}" (${path}).\n\nEscribe CERRAR para confirmar:`);
+  if (typed !== 'CERRAR') return;
+  const revoke = $('#orgRevoke').checked;
+  e.target.disabled = true; e.target.textContent = 'Cerrando sesiones…';
+  try {
+    const r = await api('/google/orgunits/signout', { method: 'POST', body: { orgUnitPath: path, revoke_tokens: revoke } });
+    const out = $('#orgSignoutOut');
+    out.textContent = `${r.ok} correcta(s), ${r.failed} fallida(s) de ${r.total}.` + (r.failedEmails.length ? '\n\nFallidas:\n' + r.failedEmails.join('\n') : '');
+    out.classList.remove('hidden');
+    toast(`Listo: ${r.ok}/${r.total} sesiones cerradas`, r.failed > 0);
+  } catch (err) { toast(err.message, true); }
+  e.target.disabled = false; e.target.textContent = 'Cerrar sesiones';
+});
+
 $('#googleForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = new FormData(e.target);

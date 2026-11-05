@@ -100,10 +100,17 @@ Con esta conexión, “Cerrar sesiones de Google” ejecuta el cierre de sesión
 
 1. En **Google Cloud Console**, crea un proyecto y habilita **Admin SDK API**.
 2. Crea una **cuenta de servicio** y descarga su llave **JSON**.
-3. En **admin.google.com → Seguridad → Acceso y control de datos → Controles de API → Delegación de todo el dominio**, agrega el *Client ID* de la cuenta de servicio con este alcance:
+3. En **admin.google.com → Seguridad → Acceso y control de datos → Controles de API → Delegación de todo el dominio**, agrega el *Client ID* de la cuenta de servicio con estos alcances (pégalos juntos, separados por coma, en el mismo campo):
    ```
-   https://www.googleapis.com/auth/admin.directory.user.security
+   https://www.googleapis.com/auth/admin.directory.user.security,https://www.googleapis.com/auth/admin.directory.user.readonly,https://www.googleapis.com/auth/admin.directory.orgunit.readonly
    ```
+   | Alcance | Para qué se usa |
+   |---|---|
+   | `admin.directory.user.security` | Cerrar sesiones y revocar accesos de una cuenta |
+   | `admin.directory.user.readonly` | Listar los usuarios de una unidad organizativa (cierre masivo) |
+   | `admin.directory.orgunit.readonly` | Listar las unidades organizativas (por ejemplo, "Estudiantes TVS") |
+
+   Si ya habías autorizado solo el primer alcance, edita esa misma entrada (no crees una nueva para el mismo Client ID) y agrega los dos que faltan.
 4. En el servidor, define:
    ```
    GOOGLE_SA_KEY_FILE=/ruta/llave.json
@@ -113,6 +120,8 @@ Con esta conexión, “Cerrar sesiones de Google” ejecuta el cierre de sesión
 5. Reinicia el servidor. La sección **Google Workspace** del panel debe mostrar “Conectado”.
 
 La plataforma toma los correos a cerrar del campo “Correo Google Workspace asignado” de cada equipo y de las cuentas que el agente detecta en Chrome, Edge y Brave. Las cuentas `@gmail.com` personales nunca se tocan en Google: `GOOGLE_DOMAINS` las filtra, y en esos casos solo aplica la limpieza local de cookies.
+
+**Cerrar sesiones de toda una unidad organizativa.** En **Google Workspace → Cerrar sesiones por unidad organizativa**, elige una unidad (por ejemplo "Estudiantes TVS") y pulsa **Cerrar sesiones**: el panel trae todos sus usuarios y cierra la sesión de Google de cada uno. Es lo más práctico para los iPad que se prestan a los estudiantes, donde no se sabe de antemano qué cuenta usará cada uno: en vez de asignar un correo por equipo, cierras de una vez todas las sesiones de la unidad al final del día o de la jornada.
 
 ---
 
