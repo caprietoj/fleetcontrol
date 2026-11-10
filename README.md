@@ -136,7 +136,56 @@ La plataforma toma los correos a cerrar del campo “Correo Google Workspace asi
 
 ---
 
-## 5. Seguridad
+## 5. Encender y controlar equipos remotamente
+
+### Encender con Wake-on-LAN
+
+En la ficha de cada equipo (o seleccionando varios y pulsando **Encender**) FleetControl envía un *magic packet* al MAC del equipo. Como el servidor está fuera de la red del colegio, el paquete lo emite **otro equipo FleetControl encendido en la misma red o subred** (relé). Por eso:
+
+- El equipo destino debe tener **Wake-on-LAN habilitado** en la BIOS/UEFI y en la tarjeta de red. En los MacBook normalmente funciona por Ethernet o adaptador USB-C/Thunderbolt; por Wi-Fi casi nunca.
+- Debe haber al menos **un equipo encendido con el agente en la misma red/subred** del equipo apagado. FleetControl elige uno o varios relés por grupo o por los tres primeros octetos de la IP.
+- El agente **1.1.0 o superior** reporta el MAC automáticamente. Si el equipo aún no se ha actualizado, puedes escribir el MAC a mano en su ficha (*Dispositivos → equipo → MAC para Wake-on-LAN*).
+- El magic packet no cruza VLANs ni subredes. Si el colegio tiene VLANs separadas, usa el mismo grupo/subred o coloca un relé en cada VLAN.
+
+### Acceso remoto en el navegador (VNC)
+
+En la ficha del equipo, pulsa **Preparar acceso remoto**. La orden se ejecuta en el siguiente chequeo del agente (≤1 minuto):
+
+- **macOS**: activa la pantalla compartida integrada y fija una contraseña VNC.
+- **Windows**: instala TightVNC en modo servicio, solo para conexiones locales (*loopback*) y con contraseña.
+- En ambos casos instala `frpc` y lo deja como servicio, conectado por **WSS al puerto 443** del panel. No hay que abrir puertos ni tocar el router del colegio.
+
+Cuando el equipo esté preparado y encendido, pulsa **Conectar** y se abre noVNC en una pestaña nueva. El tráfico viaja cifrado por el túnel; el VNC solo escucha en localhost en Windows. En macOS el servicio de pantalla compartida puede seguir escuchando en la red local con contraseña: si quieres cerrarlo del todo, bloquea el puerto 5900 en el firewall del Mac.
+
+Requisitos y notas:
+
+- El panel debe estar publicado con **HTTPS** (Cloudflare Tunnel, Caddy, Nginx…). El agente se conecta a `wss://<tu-dominio>/frpws`.
+- Define `FRP_TOKEN` en `.env`; lo comparten el panel y el contenedor `frps`. El rango `FRP_REMOTE_PORT_START`–`FRP_REMOTE_PORT_END` se usa para un puerto interno por equipo (no se publica).
+- El acceso remoto funciona con el equipo **encendido y conectado**. Si está apagado, primero usa **Encender** (Wake-on-LAN) o enciéndelo manualmente.
+- La primera vez en macOS puede pedir permisos de Grabación de pantalla; acéptalos si aparecen. En Windows, TightVNC es software GPL independiente del panel.
+- Los puertos remotos de frp **no se publican** en Docker: solo el contenedor del panel puede alcanzarlos a través de la red interna.
+- El binario de frp usa la ruta WebSocket `/frpws` para evitar bloqueos del WAF de Cloudflare; los binarios de los agentes y el contenedor `frps` ya vienen preparados.
+
+## 6. Roles y permisos
+
+El panel maneja tres roles:
+
+| Rol | Permisos |
+|---|---|
+| **Aprendiz** (`aprendiz`) | Solo **registrar equipos** (comandos de instalación, iPad manual) y **cerrar las sesiones de Google Workspace** de la unidad organizativa `Estudiantes Activos` (incluye sus subunidades). No puede ver dispositivos, software, cola, historial, auditoría ni administradores. |
+| **Auxiliar de sistemas** (`auxiliar`) | Acceso completo al panel. |
+| **Jefe de sistemas** (`jefe`) | Acceso completo al panel. |
+
+Los usuarios se crean desde *Administradores* eligiendo el rol, o con el script de aprovisionamiento, que además escribe las credenciales en un `.txt` y envía un correo a cada persona:
+
+```bash
+node server/src/scripts/seed-users.js            # crea usuarios + .txt + correos
+node server/src/scripts/seed-users.js --no-email # solo crea y escribe el .txt
+```
+
+El `.txt` queda en `<DATA_DIR>/credenciales_usuarios.txt` con permisos `600`. Para enviar los correos configura `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` y `SMTP_FROM`; si no hay SMTP, el script intenta Gmail API con la cuenta de servicio (alcance `gmail.send`). La unidad del rol aprendiz se puede cambiar con `LEARNER_ORG_UNIT` (por defecto `Estudiantes Activos`).
+
+## 7. Seguridad
 
 - Contraseñas de administradores con *scrypt*, sesiones de 12 horas en cookie `HttpOnly` y `SameSite=Strict`, y bloqueo tras 5 intentos fallidos.
 - Cada equipo tiene su propio token (en el servidor solo se guarda su hash). Si quitas un equipo del panel, su token deja de funcionar.
@@ -175,6 +224,10 @@ Si tienes el manual de marca con los códigos HEX oficiales, ponlos en `BRAND_PR
 | `GOOGLE_SA_KEY_FILE` o `GOOGLE_SA_KEY_JSON` | Llave de la cuenta de servicio |
 | `GOOGLE_ADMIN_EMAIL` | Superadministrador de Workspace al que suplanta la cuenta de servicio |
 | `GOOGLE_DOMAINS` | Dominios administrados, separados por comas |
+| `FRP_TOKEN` | Token compartido por el panel y `frps` para el túnel de acceso remoto |
+| `FRP_PUBLIC_HOST` / `FRP_PUBLIC_PORT` | Dominio y puerto que usan los equipos para el túnel (443/WSS) |
+| `FRP_REMOTE_PORT_START` / `FRP_REMOTE_PORT_END` | Rango interno de puertos VNC (por defecto 41000–41099) |
+| `FRPS_HOST` / `FRPS_PORT` | Dirección interna del contenedor `frps` (por defecto `frps:7000`) |
 
 ## Respaldo
 
@@ -184,13 +237,17 @@ Toda la información está en `server/data/fleetcontrol.db` (SQLite). Basta con 
 
 ```
 server/
-  src/server.js            API del panel y de los agentes
+  src/server.js            API del panel, agentes y proxy frp/noVNC
   src/db.js                Base de datos SQLite
   src/google.js            Google Workspace (signOut, revocar tokens)
   src/ipad.js              Registro de iPad por perfil (Profile Service)
+  src/mailer.js            Envío de correos (SMTP o Gmail API)
   src/scripts/commands.js  Validación y generación de scripts bash/PowerShell
   src/scripts/browsers.js  Rutas de datos de cada navegador
-  public/                  Panel web
+  src/scripts/seed-users.js Aprovisiona usuarios y credenciales
+  public/                  Panel web + noVNC (remote.html/remote.js)
+  public/tools/            frpc para macOS/Windows y TightVNC
+frps/                      Contenedor del servidor de túneles frp
 agents/
   macos/install.sh, agent.sh
   windows/install.ps1, agent.ps1

@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Acceso remoto · FleetControl</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="remote-page">
+  <div id="remoteBar">
+    <div class="remote-title">FleetControl · <span id="remoteTitle">Acceso remoto</span></div>
+    <div class="remote-actions">
+      <button id="cadBtn" class="btn small ghost" type="button" title="Enviar Ctrl+Alt+Supr">Ctrl+Alt+Supr</button>
+      <button id="fullBtn" class="btn small ghost" type="button">Pantalla completa</button>
+      <button id="closeBtn" class="btn small danger-outline" type="button">Desconectar</button>
+    </div>
+  </div>
+  <div id="screen"></div>
+  <div id="status" class="remote-status">Conectando…</div>
+  <script type="module" src="/remote.js"></script>
+</body>
+</html>

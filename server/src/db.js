@@ -86,12 +86,55 @@ CREATE TABLE IF NOT EXISTS audit (
   ip TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS remote_sessions (
+  token_hash TEXT PRIMARY KEY,
+  admin_id INTEGER NOT NULL,
+  device_id TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL
+);
 `);
 
 // ---------- migraciones ----------
-for (const col of ['udid TEXT', 'imei TEXT', "enroll_method TEXT DEFAULT 'agent'"]) {
+for (const col of [
+  'udid TEXT', 'imei TEXT', "enroll_method TEXT DEFAULT 'agent'",
+  'mac TEXT', 'macs TEXT', 'remote_port INTEGER', 'vnc_password TEXT',
+  'remote_enabled INTEGER NOT NULL DEFAULT 0', 'remote_enabled_at TEXT',
+]) {
   try { db.exec(`ALTER TABLE devices ADD COLUMN ${col}`); } catch { /* ya existe */ }
 }
+// Roles del panel. Los administradores que ya existían conservan acceso total (jefe).
+for (const col of ["role TEXT NOT NULL DEFAULT 'jefe'", 'email TEXT']) {
+  try { db.exec(`ALTER TABLE admins ADD COLUMN ${col}`); } catch { /* ya existe */ }
+}
+
+// ---------- roles y permisos ----------
+const ROLES = {
+  aprendiz: {
+    label: 'Aprendiz',
+    level: 'learner',
+    description: 'Solo registrar equipos y cerrar sesiones de Google de la unidad Estudiantes Activos.',
+    permissions: {
+      enroll_devices: true,
+      google_org_signout: true,
+    },
+  },
+  auxiliar: {
+    label: 'Auxiliar de sistemas',
+    level: 'admin',
+    description: 'Acceso completo al panel.',
+    permissions: { all: true },
+  },
+  jefe: {
+    label: 'Jefe de sistemas',
+    level: 'admin',
+    description: 'Acceso completo al panel.',
+    permissions: { all: true },
+  },
+};
+const isRole = (r) => Object.prototype.hasOwnProperty.call(ROLES, r);
+const roleInfo = (r) => ROLES[isRole(r) ? r : 'aprendiz'];
+const permissionsFor = (r) => roleInfo(r).permissions;
 
 // ---------- helpers ----------
 const sha256 = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
@@ -141,5 +184,5 @@ function bootstrap() {
 
 module.exports = {
   db, DATA_DIR, sha256, randomToken, hashPassword, verifyPassword,
-  getSetting, setSetting, audit, bootstrap,
+  getSetting, setSetting, audit, bootstrap, ROLES, isRole, roleInfo, permissionsFor,
 };

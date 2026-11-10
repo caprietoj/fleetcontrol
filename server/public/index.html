@@ -28,17 +28,18 @@
         <div><span class="brand-name">FleetControl</span><small class="brand-product">Gestión de equipos TI</small></div>
       </div>
       <nav>
-        <a data-view="devices" class="active">Dispositivos</a>
-        <a data-view="software">Catálogo de software</a>
-        <a data-view="history">Historial de acciones</a>
-        <a data-view="queue">Cola de acciones</a>
+        <a data-view="devices" class="active" data-role="admin">Dispositivos</a>
+        <a data-view="software" data-role="admin">Catálogo de software</a>
+        <a data-view="history" data-role="admin">Historial de acciones</a>
+        <a data-view="queue" data-role="admin">Cola de acciones</a>
         <a data-view="google">Google Workspace</a>
         <a data-view="enroll">Registrar equipos</a>
-        <a data-view="settings">Administradores</a>
-        <a data-view="audit">Auditoría</a>
+        <a data-view="settings" data-role="admin">Administradores</a>
+        <a data-view="audit" data-role="admin">Auditoría</a>
       </nav>
       <div class="sidebar-foot">
         <span id="whoami" class="muted"></span>
+        <span id="whoamiRole" class="muted role-tag"></span>
         <button id="logoutBtn" class="btn ghost small">Salir</button>
       </div>
     </aside>
@@ -64,6 +65,7 @@
         <div id="bulkBar" class="bulkbar">
           <span id="selCount">0 seleccionados</span>
           <div class="actions">
+            <button class="btn" data-action="wake">Encender</button>
             <button class="btn" data-action="google_signout">Cerrar sesiones Google</button>
             <button class="btn" data-action="clean_browsers">Limpiar navegadores</button>
             <button class="btn" data-action="delete_files">Eliminar archivos</button>
@@ -78,6 +80,7 @@
                 <a data-action="restart">Reiniciar</a>
                 <a data-action="shutdown">Apagar</a>
                 <a data-action="set_group">Asignar grupo</a>
+                <a data-action="remote_enable">Preparar acceso remoto</a>
                 <a data-action="update_agent">Actualizar agente</a>
                 <a data-action="remove_agent" class="danger">Desinstalar agente</a>
               </div>
@@ -158,6 +161,7 @@
           <p class="muted">Trae todos los usuarios de una unidad (por ejemplo <b>Estudiantes TVS</b>) y cierra sus sesiones de Google de una sola vez. Útil para los iPad que se prestan: no hay que saber qué correo usó cada estudiante.</p>
           <label>Unidad organizativa<select id="orgUnitSelect"><option value="">Selecciona…</option></select></label>
           <p class="hint" id="orgUnitInfo"></p>
+          <label class="check"><input type="checkbox" id="orgRecursive" checked> Incluir también las subunidades (grados, cursos…)</label>
           <label class="check"><input type="checkbox" id="orgRevoke"> También revocar accesos de aplicaciones de terceros (OAuth)</label>
           <div class="form-actions"><button class="btn danger-outline" id="orgSignoutBtn" disabled type="button">Cerrar sesiones</button></div>
           <pre id="orgSignoutOut" class="output hidden"></pre>
@@ -241,8 +245,14 @@
             <h3>Usuarios del panel</h3>
             <table class="table compact" id="adminTable"><tbody></tbody></table>
             <form id="adminForm" class="inline-form">
-              <input name="username" placeholder="usuario" required>
+              <input name="username" placeholder="usuario o correo" required>
+              <input name="email" type="email" placeholder="correo (opcional)">
               <input name="password" type="password" placeholder="contraseña (mín. 10)" required>
+              <select name="role" aria-label="Rol">
+                <option value="auxiliar">Auxiliar de sistemas</option>
+                <option value="jefe">Jefe de sistemas</option>
+                <option value="aprendiz">Aprendiz</option>
+              </select>
               <button class="btn" type="submit">Agregar</button>
             </form>
           </div>

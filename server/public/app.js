@@ -63,7 +63,15 @@ const platTag = (p) => ({ macos: '<span class="tag mac">macOS</span>', windows: 
 const isIpad = (d) => d.platform === 'ipados';
 
 // ===================== estado =====================
-const state = { devices: [], selected: new Set(), settings: null, packages: [], view: 'devices' };
+const state = { devices: [], selected: new Set(), settings: null, packages: [], view: 'devices', me: null };
+const isAdminUser = () => Boolean(state.me && state.me.level !== 'learner');
+
+function applyRole() {
+  const admin = isAdminUser();
+  $$('.sidebar nav a[data-role="admin"]').forEach((a) => a.classList.toggle('hidden', !admin));
+  const gf = $('#googleForm'); if (gf) gf.classList.toggle('hidden', !admin);
+  if (!admin && !['enroll', 'google'].includes(state.view)) state.view = 'enroll';
+}
 
 // ===================== login =====================
 function showLogin() { $('#app').classList.add('hidden'); $('#login').classList.remove('hidden'); }
@@ -82,6 +90,7 @@ $('#logoutBtn').addEventListener('click', async () => { await api('/logout', { m
 
 // ===================== navegación =====================
 function go(view) {
+  if (!isAdminUser() && !['enroll', 'google'].includes(view)) view = 'enroll';
   state.view = view;
   $$('.sidebar nav a').forEach((a) => a.classList.toggle('active', a.dataset.view === view));
   $$('main .view').forEach((v) => v.classList.toggle('hidden', v.dataset.view !== view));
@@ -143,7 +152,7 @@ function renderDevices() {
     return `<tr data-id="${esc(d.id)}">
       <td class="chk"><input type="checkbox" ${state.selected.has(d.id) ? 'checked' : ''}></td>
       <td><span class="dot ${d.online && d.status !== 'retired' ? 'on' : ''} ${isIpad(d) ? 'ipad' : ''}"></span><b>${esc(d.hostname || '(sin nombre)')}</b>
-        ${d.pending ? ` <span class="tag">${d.pending} en cola</span>` : ''}${d.status === 'retired' ? ' <span class="tag">retirado</span>' : ''}
+        ${d.pending ? ` <span class="tag">${d.pending} en cola</span>` : ''}${d.remote_enabled ? ' <span class="tag">remoto</span>' : ''}${d.status === 'retired' ? ' <span class="tag">retirado</span>' : ''}
         <div class="sub">${esc(d.model || '')} · S/N ${esc(d.serial || '—')}</div></td>
       <td>${esc(d.logged_user || '—')}<div class="sub">${g.map(esc).join(', ') || (isIpad(d) ? 'asigna un correo en la ficha' : 'sin cuenta Google detectada')}</div></td>
       <td>${platTag(d.platform)}<div class="sub">${esc(d.os_version || '')}</div></td>
@@ -186,8 +195,59 @@ document.addEventListener('click', () => $('#moreMenu').classList.add('hidden'))
 $('#bulkBar').addEventListener('click', (e) => {
   const a = e.target.closest('[data-action]'); if (!a) return;
   if (!state.selected.size) return toast('Selecciona al menos un equipo', true);
+  if (a.dataset.action === 'wake') return wakeDevices([...state.selected]);
+  if (a.dataset.action === 'remote_enable') return remoteEnableBulk([...state.selected]);
   openAction(a.dataset.action, [...state.selected]);
 });
+
+async function wakeDevices(ids) {
+  try {
+    const r = await api('/devices/wake', { method: 'POST', body: { device_ids: ids } });
+    const parts = [];
+    if (r.queued) parts.push(`${r.queued} en cola`);
+    if (r.online) parts.push(`${r.online} ya encendido(s)`);
+    if (r.skipped) parts.push(`${r.skipped} omitido(s)`);
+    toast('Wake-on-LAN: ' + (parts.join(', ') || 'sin cambios'), !r.queued && !r.online);
+    if (r.details && r.details.length && !r.queued) console.warn(r.details.join('\n'));
+  } catch (err) { toast(err.message, true); }
+}
+
+async function remoteEnableBulk(ids) {
+  if (!state.settings.remote || !state.settings.remote.configured) return toast('El acceso remoto no está configurado en el servidor.', true);
+  if (!confirm(`Se activará VNC y un túnel cifrado en ${ids.length} equipo(s). La orden se ejecuta en el próximo chequeo de cada equipo (≤1 min). ¿Continuar?`)) return;
+  try {
+    const r = await api('/devices/remote/enable-bulk', { method: 'POST', body: { device_ids: ids } });
+    toast(`Acceso remoto: ${r.queued} en cola, ${r.skipped} omitido(s)`, !r.queued);
+    if (r.details && r.details.length) console.info(r.details.join('\n'));
+  } catch (err) { toast(err.message, true); }
+}
+
+async function remoteEnable(id) {
+  if (!state.settings.remote || !state.settings.remote.configured) return toast('El acceso remoto no está configurado en el servidor.', true);
+  if (!confirm('Se activará VNC y un túnel cifrado en este equipo. La orden se ejecutará en su próximo chequeo (≤1 min). ¿Continuar?')) return;
+  try {
+    const r = await api(`/devices/${id}/remote/enable`, { method: 'POST', body: {} });
+    toast(r.online ? 'Preparando acceso remoto… puede tardar hasta 1 minuto' : 'Equipo apagado: se preparará cuando se encienda y conecte');
+    setTimeout(() => { if (!$('#drawer').classList.contains('hidden')) openDevice(id); }, 4000);
+  } catch (err) { toast(err.message, true); }
+}
+
+async function remoteConnect(id) {
+  try {
+    const r = await api(`/devices/${id}/remote/session`, { method: 'POST', body: {} });
+    const w = window.open(r.url, '_blank', 'noopener');
+    if (!w) toast('Permite las ventanas emergentes para abrir el acceso remoto', true);
+  } catch (err) { toast(err.message, true); }
+}
+
+async function remoteDisable(id) {
+  if (!confirm('¿Desactivar el acceso remoto de este equipo y cerrar el túnel?')) return;
+  try {
+    await api(`/devices/${id}/remote/disable`, { method: 'POST', body: {} });
+    toast('Acceso remoto desactivado');
+    setTimeout(() => { if (!$('#drawer').classList.contains('hidden')) openDevice(id); }, 3000);
+  } catch (err) { toast(err.message, true); }
+}
 
 // ===================== ficha del dispositivo =====================
 async function openDevice(id) {
@@ -199,6 +259,8 @@ async function openDevice(id) {
     <div class="quick">
       ${(isIpad(d) ? ['google_signout'] : ['google_signout', 'clean_browsers', 'delete_files', 'install_software', 'list_software', 'message', 'restart'])
         .map((t) => `<button class="btn small" data-act="${t}">${esc(state.settings.types[t])}</button>`).join('')}
+      ${isIpad(d) ? '' : `<button class="btn small" id="wakeDev" ${d.online ? 'disabled title="Ya está encendido"' : ''}>Encender (WOL)</button>
+      <button class="btn small" id="remoteDev">${d.remote_enabled ? 'Conectar remoto' : 'Preparar acceso remoto'}</button>`}
     </div>
     ${isIpad(d) ? `<div class="warnbox" style="margin-top:10px">En iPad solo está disponible <b>Cerrar sesiones de Google</b> (asigna el correo abajo). Borrar el iPad, instalar apps o limpiar Safari requiere un MDM de Apple. Para quitarlo: en el iPad, Ajustes → General → VPN y gestión de dispositivos → eliminar el perfil.</div>` : ''}
     <div class="section-title">Información</div>
@@ -210,7 +272,7 @@ async function openDevice(id) {
       <dt>Memoria</dt><dd>${d.ram_gb ? esc(d.ram_gb) + ' GB' : '—'}</dd>
       <dt>Disco</dt><dd>${d.disk_total_gb ? `${esc(d.disk_free_gb)} GB libres de ${esc(d.disk_total_gb)} GB` : '—'}</dd>`}
       ${isIpad(d) ? `<dt>UDID</dt><dd>${esc(d.udid || '—')}</dd><dt>IMEI</dt><dd>${esc(d.imei || '—')}</dd><dt>Asignado a</dt><dd>${esc(d.logged_user || '—')}</dd>`
-        : `<dt>IP</dt><dd>${esc(d.ip || '—')}</dd><dt>Usuario actual</dt><dd>${esc(d.logged_user || '—')}</dd>`}
+        : `<dt>IP</dt><dd>${esc(d.ip || '—')}</dd><dt>MAC (Wake-on-LAN)</dt><dd>${esc(d.mac || '—')}</dd><dt>Usuario actual</dt><dd>${esc(d.logged_user || '—')}</dd>`}
       ${isIpad(d) ? '' : `<dt>Cuentas Google detectadas</dt><dd>${(d.google_accounts || []).map(esc).join('<br>') || '—'}</dd>`}
       <dt>Registrado</dt><dd>${fmtDate(d.enrolled_at)}</dd>
       <dt>${isIpad(d) ? 'Registro' : 'Agente'}</dt><dd>${isIpad(d) ? (d.enroll_method === 'manual' ? 'Manual' : 'Perfil de configuración') : esc(d.agent_version || '—')}</dd>
@@ -219,6 +281,7 @@ async function openDevice(id) {
     <form id="devForm" class="card">
       ${isIpad(d) ? `<label>Asignado a<input name="assigned_to" value="${esc(d.logged_user || '')}" placeholder="Estudiante, docente o área"></label>` : ''}
       <label>Correo Google Workspace asignado<input name="google_email" value="${esc(d.google_email || '')}" placeholder="usuario@tvs.edu.co"></label>
+      ${isIpad(d) ? '' : `<label>MAC para Wake-on-LAN<input name="mac" value="${esc(d.mac || '')}" placeholder="AA:BB:CC:DD:EE:FF"></label>`}
       <label>Grupo<input name="group_name" value="${esc(d.group_name || '')}" placeholder="Grado 5A, Docentes, Administrativos…" list="groupList"></label>
       <datalist id="groupList">${[...new Set(state.devices.map((x) => x.group_name).filter(Boolean))].map((g) => `<option value="${esc(g)}">`).join('')}</datalist>
       <label>Notas<textarea name="notes" rows="2">${esc(d.notes || '')}</textarea></label>
@@ -228,6 +291,17 @@ async function openDevice(id) {
         <button class="btn primary" type="submit">Guardar</button>
       </div>
     </form>
+    ${isIpad(d) ? '' : `<div class="section-title">Acceso remoto</div>
+    <div class="card">
+      <p class="muted">VNC dentro del navegador a través de un túnel cifrado desde el equipo. En Mac usa la pantalla compartida integrada; en Windows instala TightVNC. La primera vez tarda hasta un minuto (el agente revisa cada 60 s).</p>
+      ${state.settings.remote && state.settings.remote.configured ? '' : '<div class="dangerbox">El acceso remoto no está configurado en el servidor (falta FRP_TOKEN).</div>'}
+      <p>Estado: <b>${d.remote_enabled ? 'Activado' : (d.remote_port ? 'Preparando…' : 'Sin preparar')}</b>${d.remote_port ? ` · puerto ${d.remote_port}` : ''}</p>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="remoteEnable">${d.remote_enabled ? 'Reconfigurar' : 'Preparar acceso remoto'}</button>
+        ${d.remote_enabled ? '<button type="button" class="btn primary" id="remoteConnect">Conectar</button><button type="button" class="btn danger-outline" id="remoteDisable">Desactivar</button>' : ''}
+      </div>
+      <pre id="remoteOut" class="output hidden"></pre>
+    </div>`}
     ${software ? `<div class="section-title">Software instalado (${fmtDate(software.finished_at)})</div><pre class="output">${esc(software.output)}</pre>` : ''}
     <div class="section-title">Historial</div>
     <table class="table compact clickable" id="devHist"><tbody>
@@ -237,6 +311,12 @@ async function openDevice(id) {
   $('#drawer').classList.remove('hidden');
 
   $$('[data-act]', body).forEach((b) => b.addEventListener('click', () => openAction(b.dataset.act, [d.id])));
+  const wakeBtn = $('#wakeDev'); if (wakeBtn) wakeBtn.addEventListener('click', () => wakeDevices([d.id]));
+  const remoteBtn = $('#remoteDev');
+  if (remoteBtn) remoteBtn.addEventListener('click', () => d.remote_enabled ? remoteConnect(d.id) : remoteEnable(d.id));
+  const reBtn = $('#remoteEnable'); if (reBtn) reBtn.addEventListener('click', () => remoteEnable(d.id));
+  const rcBtn = $('#remoteConnect'); if (rcBtn) rcBtn.addEventListener('click', () => remoteConnect(d.id));
+  const rdBtn = $('#remoteDisable'); if (rdBtn) rdBtn.addEventListener('click', () => remoteDisable(d.id));
   $('#devForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
@@ -575,6 +655,10 @@ async function loadOrgUnits() {
     $('#orgUnitInfo').textContent = err.message;
   }
 }
+$('#orgRecursive').addEventListener('change', () => {
+  const sel = $('#orgUnitSelect');
+  if (sel.value) sel.dispatchEvent(new Event('change'));
+});
 $('#orgUnitSelect').addEventListener('change', async (e) => {
   const path = e.target.value;
   const info = $('#orgUnitInfo'); const btn = $('#orgSignoutBtn');
@@ -582,7 +666,8 @@ $('#orgUnitSelect').addEventListener('change', async (e) => {
   if (!path) { info.textContent = ''; return; }
   info.textContent = 'Consultando usuarios…';
   try {
-    const r = await api('/google/orgunits/users?path=' + encodeURIComponent(path));
+    const children = $('#orgRecursive').checked ? '&includeChildren=1' : '';
+    const r = await api('/google/orgunits/users?path=' + encodeURIComponent(path) + children);
     info.innerHTML = r.count
       ? `<b>${r.count} usuario(s)</b> en esta unidad. Ejemplo: ${r.users.slice(0, 3).map((u) => esc(u.email)).join(', ')}${r.count > 3 ? '…' : ''}`
       : 'Esta unidad no tiene usuarios.';
@@ -600,7 +685,7 @@ $('#orgSignoutBtn').addEventListener('click', async (e) => {
   const revoke = $('#orgRevoke').checked;
   e.target.disabled = true; e.target.textContent = 'Cerrando sesiones…';
   try {
-    const r = await api('/google/orgunits/signout', { method: 'POST', body: { orgUnitPath: path, revoke_tokens: revoke } });
+    const r = await api('/google/orgunits/signout', { method: 'POST', body: { orgUnitPath: path, revoke_tokens: revoke, includeChildren: $('#orgRecursive').checked } });
     const out = $('#orgSignoutOut');
     out.textContent = `${r.ok} correcta(s), ${r.failed} fallida(s) de ${r.total}.` + (r.failedEmails.length ? '\n\nFallidas:\n' + r.failedEmails.join('\n') : '');
     out.classList.remove('hidden');
@@ -663,15 +748,23 @@ $('#ipadForm').addEventListener('submit', async (e) => {
 });
 
 // ===================== administradores =====================
+const ROLE_OPTIONS = [['aprendiz', 'Aprendiz'], ['auxiliar', 'Auxiliar de sistemas'], ['jefe', 'Jefe de sistemas']];
 async function loadAdmins() {
   const rows = await api('/admins');
-  $('#adminTable tbody').innerHTML = rows.map((a) => `<tr><td><b>${esc(a.username)}</b><div class="sub">desde ${fmtDate(a.created_at)}</div></td>
+  $('#adminTable tbody').innerHTML = rows.map((a) => `<tr>
+    <td><b>${esc(a.username)}</b><div class="sub">${esc(a.email || '')}</div><div class="sub">desde ${fmtDate(a.created_at)}</div></td>
+    <td><select data-roleadmin="${a.id}" aria-label="Rol">${ROLE_OPTIONS.map(([v, l]) => `<option value="${v}" ${a.role === v ? 'selected' : ''}>${l}</option>`).join('')}</select></td>
     <td style="text-align:right"><button class="btn small danger-outline" data-deladmin="${a.id}">Eliminar</button></td></tr>`).join('');
 }
 $('#adminTable').addEventListener('click', async (e) => {
   const b = e.target.closest('[data-deladmin]'); if (!b) return;
   if (!confirm('¿Eliminar este administrador?')) return;
   try { await api('/admins/' + b.dataset.deladmin, { method: 'DELETE', body: {} }); loadAdmins(); } catch (err) { toast(err.message, true); }
+});
+$('#adminTable').addEventListener('change', async (e) => {
+  const sel = e.target.closest('[data-roleadmin]'); if (!sel) return;
+  try { await api('/admins/' + sel.dataset.roleadmin, { method: 'PATCH', body: { role: sel.value } }); toast('Rol actualizado'); }
+  catch (err) { toast(err.message, true); loadAdmins(); }
 });
 $('#adminForm').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -715,9 +808,13 @@ async function loadBrand() {
 async function init() {
   try {
     const me = await api('/me');
+    state.me = me;
     state.settings = await api('/settings');
-    $('#whoami').textContent = me.username;
+    $('#whoami').textContent = me.email || me.username;
+    const roleEl = $('#whoamiRole');
+    if (roleEl) { roleEl.textContent = me.role_label; roleEl.classList.remove('hidden'); }
     $('#insecureBanner').classList.toggle('hidden', !state.settings.insecure);
+    applyRole();
     showApp(); updateKinds(); go(state.view);
   } catch { showLogin(); }
 }

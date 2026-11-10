@@ -69,6 +69,9 @@ const TYPES = {
   shutdown: 'Apagar',
   update_agent: 'Actualizar agente',
   remove_agent: 'Desinstalar agente',
+  wake_on_lan: 'Encender (Wake-on-LAN)',
+  enable_remote: 'Preparar acceso remoto',
+  disable_remote: 'Desactivar acceso remoto',
 };
 
 /** Valida el payload. Devuelve { payload, summary }. */
@@ -143,6 +146,33 @@ function prepare(type, p, ctx) {
       const delay = Math.max(1, Math.min(120, parseInt(p.delay_min, 10) || 1));
       return { payload: { delay_min: delay }, summary: `en ${delay} min` };
     }
+    case 'wake_on_lan': {
+      const mac = String(p.mac || '').trim().replace(/-/g, ':').toUpperCase();
+      if (!/^[0-9A-F]{2}(:[0-9A-F]{2}){5}$/.test(mac)) fail('Dirección MAC no válida.');
+      const bcasts = (Array.isArray(p.bcasts) ? p.bcasts : [])
+        .map((b) => String(b).trim())
+        .filter((b) => /^(\d{1,3}\.){3}\d{1,3}$/.test(b));
+      return { payload: { mac, bcasts: [...new Set(bcasts)].slice(0, 8) }, summary: `Magic packet → ${mac}` };
+    }
+    case 'enable_remote': {
+      const port = parseInt(p.port, 10);
+      const password = String(p.password || '');
+      const frpAddr = String(p.frp_addr || '').trim();
+      const frpPort = parseInt(p.frp_port, 10) || 443;
+      const frpToken = String(p.frp_token || '');
+      const tls = p.tls !== false;
+      if (!Number.isInteger(port) || port < 1 || port > 65535) fail('Puerto remoto no válido.');
+      if (!/^[A-Za-z0-9]{8}$/.test(password)) fail('La contraseña VNC debe tener 8 caracteres alfanuméricos.');
+      if (!/^[a-z0-9.-]+$/i.test(frpAddr)) fail('Servidor de túnel no válido.');
+      if (!Number.isInteger(frpPort) || frpPort < 1 || frpPort > 65535) fail('Puerto del túnel no válido.');
+      if (!/^[A-Za-z0-9_-]{8,128}$/.test(frpToken)) fail('Token del túnel no válido.');
+      return {
+        payload: { port, password, frp_addr: frpAddr, frp_port: frpPort, frp_token: frpToken, tls },
+        summary: `VNC por túnel en el puerto ${port}${tls ? ' (WSS)' : ''}`,
+      };
+    }
+    case 'disable_remote':
+      return { payload: {}, summary: 'Cerrar túnel y desactivar VNC' };
     case 'list_software':
     case 'update_agent':
     case 'remove_agent':
@@ -279,6 +309,105 @@ for H in /Users/*; do rm -rf "$H/Applications/$APP.app" 2>/dev/null; done
 exit 0
 `;
     }
+    case 'wake_on_lan': {
+      const bcasts = p.bcasts.length ? p.bcasts : ['255.255.255.255'];
+      return `#!/bin/bash
+# FleetControl · Wake-on-LAN
+MAC=${shq(p.mac)}
+BCASTS=(${bcasts.map(shq).join(' ')})
+HEX=$(printf '%s' "$MAC" | tr -d ':-')
+perl -MSocket -e '
+  my ($hex, @b) = @ARGV;
+  my $m = pack("H*", $hex);
+  my $pkt = ("\\xff" x 6) . ($m x 16);
+  socket(my $s, PF_INET, SOCK_DGRAM, getprotobyname("udp")) or die "socket: $!";
+  setsockopt($s, SOL_SOCKET, SO_BROADCAST, 1) or die "broadcast: $!";
+  for my $port (7, 9) {
+    for my $addr (@b) {
+      send($s, $pkt, 0, sockaddr_in($port, inet_aton($addr)));
+    }
+  }
+' "$HEX" "\${BCASTS[@]}" || { echo "No se pudo enviar el magic packet"; exit 1; }
+echo "Magic packet enviado a $MAC"
+`;
+    }
+    case 'enable_remote': {
+      const tls = p.tls !== false;
+      const proto = tls ? 'wss' : 'websocket';
+      return `#!/bin/bash
+# FleetControl · acceso remoto (VNC + túnel frp)
+set -u
+PASS=${shq(p.password)}
+PORT=${p.port}
+FRP_ADDR=${shq(p.frp_addr)}
+FRP_PORT=${p.frp_port}
+FRP_TOKEN=${shq(p.frp_token)}
+DIR="/Library/Application Support/FleetControl"
+TUN="$DIR/tunnel"
+mkdir -p "$TUN"
+chmod 700 "$TUN"
+case "$(uname -m)" in
+  arm64|aarch64) BIN=frpc-darwin-arm64 ;;
+  *) BIN=frpc-darwin-amd64 ;;
+esac
+curl -fsSL ${shq(ctx.serverUrl + '/tools/')}"$BIN" -o "$TUN/frpc.new" || { echo "Error descargando el cliente del túnel"; exit 1; }
+chmod 755 "$TUN/frpc.new"
+xattr -d com.apple.quarantine "$TUN/frpc.new" 2>/dev/null || true
+mv -f "$TUN/frpc.new" "$TUN/frpc"
+cat > "$TUN/frpc.toml" <<'FCEOF'
+serverAddr = ${JSON.stringify(p.frp_addr)}
+serverPort = ${p.frp_port}
+auth.method = "token"
+auth.token = ${JSON.stringify(p.frp_token)}
+transport.protocol = ${JSON.stringify(proto)}
+transport.tls.enable = ${tls ? 'true' : 'false'}
+transport.dialServerTimeout = 20
+log.level = "warn"
+
+[[proxies]]
+name = "vnc"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 5900
+remotePort = ${p.port}
+FCEOF
+chmod 600 "$TUN/frpc.toml"
+ARD=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
+[ -x "$ARD" ] || { echo "No se encontró Screen Sharing/ARD en este Mac"; exit 1; }
+"$ARD" -activate -configure -access -on -restart -agent -privs -all \
+  -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "$PASS" >/dev/null 2>&1 \
+  || { echo "No se pudo activar Screen Sharing"; exit 1; }
+cat > /Library/LaunchDaemons/com.fleetcontrol.tunnel.plist <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.fleetcontrol.tunnel</string>
+  <key>ProgramArguments</key>
+  <array><string>$TUN/frpc</string><string>-c</string><string>$TUN/frpc.toml</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$TUN/frpc.log</string>
+  <key>StandardErrorPath</key><string>$TUN/frpc.err</string>
+</dict>
+</plist>
+PLIST
+chown root:wheel /Library/LaunchDaemons/com.fleetcontrol.tunnel.plist
+chmod 644 /Library/LaunchDaemons/com.fleetcontrol.tunnel.plist
+launchctl bootout system/com.fleetcontrol.tunnel 2>/dev/null || true
+launchctl bootstrap system /Library/LaunchDaemons/com.fleetcontrol.tunnel.plist || { echo "No se pudo iniciar el túnel"; exit 1; }
+echo "Acceso remoto listo: VNC activo y túnel en el puerto $PORT"
+`;
+    }
+    case 'disable_remote':
+      return `#!/bin/bash
+launchctl bootout system/com.fleetcontrol.tunnel 2>/dev/null || true
+rm -f /Library/LaunchDaemons/com.fleetcontrol.tunnel.plist
+rm -rf "/Library/Application Support/FleetControl/tunnel"
+ARD=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
+[ -x "$ARD" ] && "$ARD" -deactivate -configure -access -off >/dev/null 2>&1 || true
+echo "Acceso remoto desactivado"
+`;
     case 'list_software':
       return `#!/bin/bash
 for A in /Applications/*.app /Applications/*/*.app; do
@@ -462,6 +591,105 @@ foreach ($a in $apps) {
 exit $rc
 `;
     }
+    case 'wake_on_lan': {
+      const bcasts = p.bcasts.length ? p.bcasts : ['255.255.255.255'];
+      return `# FleetControl · Wake-on-LAN
+$ErrorActionPreference = 'Stop'
+$Mac = ${psq(p.mac)}
+$Hex = ($Mac -replace '[:-]','')
+$Packet = New-Object byte[] 102
+for ($i = 0; $i -lt 6; $i++) { $Packet[$i] = 255 }
+for ($i = 0; $i -lt 16; $i++) {
+  for ($j = 0; $j -lt 6; $j++) {
+    $Packet[6 + $i * 6 + $j] = [Convert]::ToByte($Hex.Substring($j * 2, 2), 16)
+  }
+}
+$Udp = New-Object System.Net.Sockets.UdpClient
+$Udp.EnableBroadcast = $true
+foreach ($b in @(${bcasts.map(psq).join(', ')})) {
+  foreach ($port in 7, 9) { $Udp.Send($Packet, $Packet.Length, $b, $port) | Out-Null }
+}
+$Udp.Close()
+"Magic packet enviado a $Mac"
+`;
+    }
+    case 'enable_remote': {
+      const tls = p.tls !== false;
+      const proto = tls ? 'wss' : 'websocket';
+      return `# FleetControl · acceso remoto (VNC + túnel frp)
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$Pass = ${psq(p.password)}
+$Port = ${p.port}
+$Dir = Join-Path $env:ProgramData 'FleetControl\\tunnel'
+New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+$Frpc = Join-Path $Dir 'frpc.exe'
+Invoke-WebRequest -Uri ${psq(ctx.serverUrl + '/tools/frpc-windows-amd64.exe')} -OutFile "$Frpc.new" -UseBasicParsing
+Move-Item "$Frpc.new" $Frpc -Force
+$Cfg = @'
+serverAddr = ${JSON.stringify(p.frp_addr)}
+serverPort = ${p.frp_port}
+auth.method = "token"
+auth.token = ${JSON.stringify(p.frp_token)}
+transport.protocol = ${JSON.stringify(proto)}
+transport.tls.enable = ${tls ? 'true' : 'false'}
+transport.dialServerTimeout = 20
+log.level = "warn"
+
+[[proxies]]
+name = "vnc"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 5900
+remotePort = ${p.port}
+'@
+Set-Content -Path (Join-Path $Dir 'frpc.toml') -Value $Cfg -Encoding ASCII
+# TightVNC (servidor) con contraseña
+$Msi = Join-Path $env:TEMP 'tightvnc-fleetcontrol.msi'
+Invoke-WebRequest -Uri ${psq(ctx.serverUrl + '/tools/tightvnc-2.8.88-gpl-setup-64bit.msi')} -OutFile $Msi -UseBasicParsing
+$msiArgs = @('/i', "\`"$Msi\`"", '/quiet', '/norestart', 'ADDLOCAL=Server', 'SERVER_REGISTER_AS_SERVICE=1',
+  'SERVER_START_AS_SERVICE=1', 'SERVER_ADD_FIREWALL_EXCEPTION=1', 'SET_USEVNCAUTHENTICATION=1',
+  'VALUE_OF_USEVNCAUTHENTICATION=1', 'SET_PASSWORD=1', "VALUE_OF_PASSWORD=$Pass",
+  'SET_ALLOWLOOPBACK=1', 'VALUE_OF_ALLOWLOOPBACK=1', 'SET_LOOPBACKONLY=1', 'VALUE_OF_LOOPBACKONLY=1')
+$p = Start-Process msiexec.exe -ArgumentList $msiArgs -Wait -PassThru
+if ($p.ExitCode -notin 0, 3010) { throw "TightVNC terminó con código $($p.ExitCode)" }
+Set-Service tvnserver -StartupType Automatic -ErrorAction SilentlyContinue
+Start-Service tvnserver -ErrorAction SilentlyContinue
+$Tvn = Join-Path $env:ProgramFiles 'TightVNC\\tvnserver.exe'
+if (Test-Path $Tvn) {
+  & $Tvn -controlservice -setpassword $Pass | Out-Null
+  $Tvk = 'HKLM:\\SOFTWARE\\TightVNC\\Server'
+  New-Item -Path $Tvk -Force | Out-Null
+  Set-ItemProperty -Path $Tvk -Name 'AllowLoopback' -Value 1 -Type DWord
+  Set-ItemProperty -Path $Tvk -Name 'LoopbackOnly' -Value 1 -Type DWord
+  Restart-Service tvnserver -Force -ErrorAction SilentlyContinue
+}
+# Túnel como tarea programada del sistema
+$action = New-ScheduledTaskAction -Execute $Frpc -Argument "-c \`"$Dir\frpc.toml\`""
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
+$sys = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+Unregister-ScheduledTask -TaskName 'FleetControl Tunnel' -Confirm:$false -ErrorAction SilentlyContinue
+Register-ScheduledTask -TaskName 'FleetControl Tunnel' -Action $action -Trigger $trigger -Settings $settings -Principal $sys | Out-Null
+Get-Process frpc -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-ScheduledTask -TaskName 'FleetControl Tunnel'
+"Acceso remoto listo: VNC activo y túnel en el puerto $Port"
+`;
+    }
+    case 'disable_remote':
+      return `# FleetControl · desactivar acceso remoto
+$ErrorActionPreference = 'Continue'
+Unregister-ScheduledTask -TaskName 'FleetControl Tunnel' -Confirm:$false -ErrorAction SilentlyContinue
+Get-Process frpc -ErrorAction SilentlyContinue | Stop-Process -Force
+Remove-Item (Join-Path $env:ProgramData 'FleetControl\\tunnel') -Recurse -Force -ErrorAction SilentlyContinue
+$Tvn = Join-Path $env:ProgramFiles 'TightVNC\\tvnserver.exe'
+if (Test-Path $Tvn) { & $Tvn -controlservice -shutdown | Out-Null; Start-Sleep -Seconds 1 }
+$keys = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'
+$app = Get-ItemProperty $keys -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like '*TightVNC*' } | Select-Object -First 1
+if ($app) { $p = Start-Process msiexec.exe -ArgumentList "/x $($app.PSChildName) /quiet /norestart" -Wait -PassThru; "TightVNC desinstalado ($($p.ExitCode))" }
+"Acceso remoto desactivado"
+`;
     case 'list_software':
       return `$keys = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'
 Get-ItemProperty $keys -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -and -not $_.SystemComponent } |

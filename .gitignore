@@ -5,3 +5,6 @@ secrets/
 data/
 *.zip
 .DS_Store
+
+# Credenciales generadas por seed-users.js
+Usuarios_FleetControl.txt

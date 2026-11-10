@@ -2,9 +2,13 @@
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
+const net = require('node:net');
 const express = require('express');
+const httpProxy = require('http-proxy');
+const { WebSocketServer } = require('ws');
 const {
   db, sha256, randomToken, hashPassword, verifyPassword, getSetting, setSetting, audit, bootstrap,
+  ROLES, isRole, roleInfo, permissionsFor,
 } = require('./db');
 const cmds = require('./scripts/commands');
 const google = require('./google');
@@ -16,8 +20,18 @@ bootstrap();
 const PORT = parseInt(process.env.PORT || '8080', 10);
 const ONLINE_WINDOW_SEC = 180;
 const SESSION_HOURS = 12;
+
+// Acceso remoto: túnel frp por WebSocket + VNC en el navegador.
+const FRPS_HOST = process.env.FRPS_HOST || 'frps';
+const FRPS_PORT = parseInt(process.env.FRPS_PORT || '7000', 10);
+const FRP_TOKEN = process.env.FRP_TOKEN || '';
+const FRP_PUBLIC_PORT = parseInt(process.env.FRP_PUBLIC_PORT || '443', 10);
+const REMOTE_PORT_START = parseInt(process.env.FRP_REMOTE_PORT_START || '41000', 10);
+const REMOTE_PORT_END = parseInt(process.env.FRP_REMOTE_PORT_END || '41099', 10);
+const REMOTE_SESSION_MIN = 10;
+const remoteConfigured = () => Boolean(FRP_TOKEN);
 const AGENTS_DIR = path.join(__dirname, '..', '..', 'agents');
-const AGENT_VERSION = '1.0.0';
+const AGENT_VERSION = '1.1.0';
 
 const app = express();
 app.disable('x-powered-by');
@@ -54,6 +68,7 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
 //  Archivos públicos: panel, agentes e instaladores
 // =====================================================================
 app.use(express.static(path.join(__dirname, '..', 'public'), { index: 'index.html' }));
+app.use('/novnc', express.static(path.join(__dirname, '..', 'node_modules', '@novnc', 'novnc'), { maxAge: '1d' }));
 
 app.get('/agent/macos/agent.sh', (req, res) => {
   res.type('text/plain').send(fs.readFileSync(path.join(AGENTS_DIR, 'macos', 'agent.sh'), 'utf8'));
@@ -189,16 +204,29 @@ agentApi.use(express.text({ limit: '1mb', type: 'text/*' }));
 const num = (v) => (v === undefined || v === null || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
 const str = (v, n = 200) => (v === undefined || v === null ? null : String(v).slice(0, n));
 
+const MAC_RE = /^[0-9A-Fa-f]{2}([:-][0-9A-Fa-f]{2}){5}$/;
+const normMac = (m) => String(m || '').trim().replace(/-/g, ':').toUpperCase();
+function cleanMacs(raw) {
+  let list = raw;
+  if (typeof list === 'string') {
+    try { list = JSON.parse(list); } catch { list = list.split(/[\s,;]+/); }
+  }
+  if (!Array.isArray(list)) list = [];
+  return [...new Set(list.map(normMac).filter((m) => MAC_RE.test(m)))].slice(0, 12);
+}
+
 function inventoryFields(b) {
   let accounts = b.google_accounts;
   if (typeof accounts === 'string') accounts = accounts.split(/[\s,]+/);
   accounts = Array.isArray(accounts)
     ? [...new Set(accounts.map((a) => String(a).trim().toLowerCase()).filter((a) => /@/.test(a)))].slice(0, 50)
     : [];
+  const macs = cleanMacs(b.macs !== undefined ? b.macs : b.mac);
+  const mac = MAC_RE.test(normMac(b.mac)) ? normMac(b.mac) : (macs[0] || null);
   return {
     hostname: str(b.hostname), serial: str(b.serial), manufacturer: str(b.manufacturer), model: str(b.model),
     os_version: str(b.os_version), cpu: str(b.cpu), ram_gb: num(b.ram_gb), disk_total_gb: num(b.disk_total_gb),
-    disk_free_gb: num(b.disk_free_gb), ip: str(b.ip), logged_user: str(b.logged_user),
+    disk_free_gb: num(b.disk_free_gb), ip: str(b.ip), mac, macs: JSON.stringify(macs), logged_user: str(b.logged_user),
     google_accounts: JSON.stringify(accounts), agent_version: str(b.agent_version, 20),
   };
 }
@@ -276,6 +304,16 @@ agentApi.post('/result/:id', deviceAuth, (req, res) => {
   if (c.type === 'remove_agent' && status === 'success') {
     db.prepare("UPDATE devices SET status = 'retired' WHERE id = ?").run(req.device.id);
   }
+  if (c.type === 'enable_remote') {
+    if (status === 'success') {
+      db.prepare('UPDATE devices SET remote_enabled = 1, remote_enabled_at = ? WHERE id = ?').run(nowSql(), req.device.id);
+    } else {
+      db.prepare('UPDATE devices SET remote_enabled = 0 WHERE id = ?').run(req.device.id);
+    }
+  }
+  if (c.type === 'disable_remote' && status === 'success') {
+    db.prepare('UPDATE devices SET remote_enabled = 0, remote_port = NULL, vnc_password = NULL, remote_enabled_at = NULL WHERE id = ?').run(req.device.id);
+  }
   res.type('text/plain').send('OK\n');
 });
 
@@ -317,37 +355,104 @@ adminApi.post('/login', (req, res) => {
   db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(new Date().toISOString());
   const secure = req.secure ? '; Secure' : '';
   res.setHeader('Set-Cookie', `fc_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_HOURS * 3600}${secure}`);
-  audit(admin.username, 'login', null, null, ip);
-  res.json({ username: admin.username });
+  audit(admin.username, 'login', null, { role: admin.role }, ip);
+  res.json({ username: admin.username, role: admin.role, role_label: roleInfo(admin.role).label });
 });
 
 function adminAuth(req, res, next) {
   const token = parseCookies(req).fc_session;
   if (!token) return res.status(401).json({ error: 'No autenticado' });
-  const s = db.prepare(`SELECT s.*, a.username FROM sessions s JOIN admins a ON a.id = s.admin_id
+  const s = db.prepare(`SELECT s.*, a.username, a.role, a.email FROM sessions s JOIN admins a ON a.id = s.admin_id
                         WHERE s.token_hash = ? AND s.expires_at > ?`).get(sha256(token), new Date().toISOString());
   if (!s) return res.status(401).json({ error: 'Sesión expirada' });
   // Protección CSRF adicional: las peticiones que modifican exigen JSON desde el panel
   if (req.method !== 'GET' && !req.is('application/json')) return res.status(415).json({ error: 'Se requiere JSON' });
-  req.admin = { id: s.admin_id, username: s.username };
+  req.admin = { id: s.admin_id, username: s.username, role: isRole(s.role) ? s.role : 'aprendiz', email: s.email };
   req.sessionHash = s.token_hash;
   next();
 }
 
 adminApi.use(adminAuth);
 const actor = (req) => req.admin.username;
+const isLearner = (req) => req.admin.role === 'aprendiz';
+
+// =====================================================================
+//  Roles y permisos
+//  aprendiz: solo registrar equipos y cerrar sesiones de Google de la
+//            unidad organizativa "Estudiantes Activos".
+//  auxiliar / jefe: acceso completo.
+// =====================================================================
+const LEARNER_ORG_UNIT_NAME = String(process.env.LEARNER_ORG_UNIT || 'Estudiantes Activos').trim();
+const LEARNER_ROUTES = new Set([
+  'GET /me',
+  'POST /logout',
+  'POST /password',
+  'GET /settings',
+  'POST /ipads',
+  'GET /google/orgunits',
+  'GET /google/orgunits/users',
+  'POST /google/orgunits/signout',
+]);
+adminApi.use((req, res, next) => {
+  if (!isLearner(req)) return next();
+  if (LEARNER_ROUTES.has(`${req.method} ${req.path.replace(/\/+$/, '') || '/'}`)) return next();
+  return res.status(403).json({
+    error: 'Tu rol de aprendiz solo permite registrar equipos y cerrar las sesiones de Google Workspace de la unidad Estudiantes Activos.',
+  });
+});
+
+const normPath = (p) => String(p || '').replace(/\/+$/, '').toLowerCase();
+const pickLearnerUnit = (units) => {
+  const target = LEARNER_ORG_UNIT_NAME.toLowerCase();
+  const matches = (units || []).filter((u) => String(u.name || '').toLowerCase() === target);
+  return matches.find((u) => String(u.orgUnitPath || '').toLowerCase().endsWith('/' + target)) || matches[0] || null;
+};
+let learnerUnitCache = { at: 0, unit: null };
+async function learnerOrgUnit() {
+  if (Date.now() - learnerUnitCache.at < 5 * 60_000) return learnerUnitCache.unit;
+  let unit = null;
+  try { unit = pickLearnerUnit(await google.listOrgUnits()); } catch { /* se reintenta luego */ }
+  learnerUnitCache = { at: Date.now(), unit };
+  return unit;
+}
+async function assertLearnerOrgUnit(path) {
+  const unit = await learnerOrgUnit();
+  if (!unit) throw new HttpError(400, `No se encontró la unidad organizativa "${LEARNER_ORG_UNIT_NAME}" en Google Workspace.`);
+  if (normPath(path) !== normPath(unit.orgUnitPath)) {
+    throw new HttpError(403, `Tu rol de aprendiz solo puede operar sobre la unidad organizativa "${LEARNER_ORG_UNIT_NAME}".`);
+  }
+  return unit;
+}
 
 adminApi.post('/logout', (req, res) => {
   db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(req.sessionHash);
   res.setHeader('Set-Cookie', 'fc_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');
   res.json({ ok: true });
 });
-adminApi.get('/me', (req, res) => res.json({ username: req.admin.username }));
+adminApi.get('/me', (req, res) => {
+  const info = roleInfo(req.admin.role);
+  res.json({
+    username: req.admin.username,
+    email: req.admin.email || null,
+    role: req.admin.role,
+    role_label: info.label,
+    level: info.level,
+    permissions: permissionsFor(req.admin.role),
+    learner_org_unit: info.level === 'learner' ? LEARNER_ORG_UNIT_NAME : null,
+  });
+});
 
 // ---------- dispositivos ----------
 const ONLINE_SQL = `(d.last_seen IS NOT NULL AND (strftime('%s','now') - strftime('%s', d.last_seen)) < ${ONLINE_WINDOW_SEC})`;
 function deviceRow(d) {
-  return { ...d, token_hash: undefined, google_accounts: JSON.parse(d.google_accounts || '[]'), online: d.platform !== 'ipados' && Boolean(d.online) };
+  return {
+    ...d,
+    token_hash: undefined,
+    vnc_password: undefined,
+    macs: JSON.parse(d.macs || '[]'),
+    google_accounts: JSON.parse(d.google_accounts || '[]'),
+    online: d.platform !== 'ipados' && Boolean(d.online),
+  };
 }
 
 adminApi.get('/devices', (req, res) => {
@@ -373,13 +478,19 @@ adminApi.patch('/devices/:id', (req, res) => {
   const b = req.body || {};
   const g = b.google_email !== undefined ? String(b.google_email).trim().toLowerCase() : d.google_email;
   if (g && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(g)) throw new HttpError(400, 'Correo no válido');
+  let mac = d.mac;
+  if (b.mac !== undefined) {
+    const v = normMac(b.mac);
+    if (v && !MAC_RE.test(v)) throw new HttpError(400, 'Dirección MAC no válida (formato AA:BB:CC:DD:EE:FF)');
+    mac = v || null;
+  }
   if (d.platform === 'ipados' && b.assigned_to !== undefined) {
     db.prepare('UPDATE devices SET logged_user = ? WHERE id = ?').run(String(b.assigned_to).trim().slice(0, 100) || null, d.id);
   }
-  db.prepare('UPDATE devices SET group_name = ?, notes = ?, google_email = ? WHERE id = ?').run(
+  db.prepare('UPDATE devices SET group_name = ?, notes = ?, google_email = ?, mac = ? WHERE id = ?').run(
     b.group_name !== undefined ? (String(b.group_name).trim().slice(0, 60) || null) : d.group_name,
     b.notes !== undefined ? String(b.notes).slice(0, 2000) : d.notes,
-    g || null, d.id,
+    g || null, mac, d.id,
   );
   audit(actor(req), 'dispositivo_editado', d.hostname, b, clientIp(req));
   res.json({ ok: true });
@@ -401,6 +512,200 @@ adminApi.delete('/devices/:id', (req, res) => {
   audit(actor(req), 'dispositivo_eliminado', d.hostname, { serial: d.serial }, clientIp(req));
   res.json({ ok: true });
 });
+
+// ---------- Wake-on-LAN ----------
+const ipv4Parts = (ip) => {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(ip || '').trim());
+  return m ? m.slice(1).map(Number) : null;
+};
+const sameSubnet = (a, b) => {
+  const x = ipv4Parts(a), y = ipv4Parts(b);
+  return Boolean(x && y && x[0] === y[0] && x[1] === y[1] && x[2] === y[2]);
+};
+const broadcastFor = (ip) => {
+  const p = ipv4Parts(ip);
+  if (!p) return null;
+  return `${p[0]}.${p[1]}.${p[2]}.255`;
+};
+const onlineRelayCandidates = () => db.prepare(`SELECT d.*, ${ONLINE_SQL} AS online FROM devices d
+  WHERE d.status != 'retired' AND d.platform != 'ipados' AND ${ONLINE_SQL}`).all();
+
+function queueWake(targets, req) {
+  const relays = onlineRelayCandidates();
+  const ctx = { serverUrl: serverUrl(req) };
+  const batch = randomToken(8);
+  const insert = db.prepare(`INSERT INTO commands(batch_id, device_id, type, summary, payload, script, status, output, created_by, finished_at)
+                             VALUES(?,?,?,?,?,?,?,?,?,?)`);
+  const result = { queued: 0, online: 0, skipped: 0, relays: 0, details: [] };
+  for (const d of targets) {
+    if (!d || d.status === 'retired' || d.platform === 'ipados') { result.skipped++; continue; }
+    if (d.online) { result.online++; continue; }
+    if (!d.mac) { result.skipped++; result.details.push(`${d.hostname || d.id}: sin dirección MAC (edítala en la ficha)`); continue; }
+    const candidates = relays.filter((r) => r.id !== d.id && (
+      (d.group_name && r.group_name === d.group_name) || sameSubnet(r.ip, d.ip)
+    ));
+    if (!candidates.length) {
+      result.skipped++;
+      result.details.push(`${d.hostname || d.id}: no hay equipos encendidos en su misma red para enviar el magic packet`);
+      continue;
+    }
+    const bcasts = ['255.255.255.255'];
+    const tb = broadcastFor(d.ip); if (tb) bcasts.push(tb);
+    for (const r of candidates) { const rb = broadcastFor(r.ip); if (rb) bcasts.push(rb); }
+    let prepared;
+    try { prepared = cmds.prepare('wake_on_lan', { mac: d.mac, bcasts: [...new Set(bcasts)] }, ctx); }
+    catch (e) { result.skipped++; result.details.push(`${d.hostname || d.id}: MAC no válido (${e.message})`); continue; }
+    let sent = 0;
+    for (const r of candidates.slice(0, 3)) {
+      const script = cmds.build('wake_on_lan', prepared.payload, r, ctx);
+      if (!script) continue;
+      insert.run(batch, r.id, 'wake_on_lan', `${prepared.summary} · ${d.hostname || ''}`.trim(),
+        JSON.stringify(prepared.payload), script, 'pending', null, actor(req), null);
+      sent++;
+    }
+    if (sent) { result.queued++; result.relays += sent; } else result.skipped++;
+  }
+  audit(actor(req), 'wake_on_lan', `${targets.length} equipo(s)`, result, clientIp(req));
+  return result;
+}
+
+adminApi.post('/devices/wake', (req, res) => {
+  const ids = Array.isArray(req.body.device_ids) ? [...new Set(req.body.device_ids)] : [];
+  if (!ids.length) throw new HttpError(400, 'Selecciona al menos un equipo');
+  const rows = ids.map((id) => db.prepare(`SELECT d.*, ${ONLINE_SQL} AS online FROM devices d WHERE d.id = ?`).get(id)).filter(Boolean);
+  if (!rows.length) throw new HttpError(404, 'Dispositivo no encontrado');
+  res.json(queueWake(rows, req));
+});
+
+adminApi.post('/devices/:id/wake', (req, res) => {
+  const d = db.prepare(`SELECT d.*, ${ONLINE_SQL} AS online FROM devices d WHERE d.id = ?`).get(req.params.id);
+  if (!d) throw new HttpError(404, 'Dispositivo no encontrado');
+  res.json(queueWake([d], req));
+});
+
+// ---------- acceso remoto (VNC sobre túnel frp) ----------
+function allocateRemotePort(deviceId) {
+  const used = new Set(db.prepare('SELECT remote_port FROM devices WHERE remote_port IS NOT NULL AND id != ?').all(deviceId).map((r) => r.remote_port));
+  for (let p = REMOTE_PORT_START; p <= REMOTE_PORT_END; p++) if (!used.has(p)) return p;
+  throw new HttpError(503, 'No hay puertos remotos disponibles. Aumenta el rango FRP_REMOTE_PORT_*');
+}
+
+function remoteFrpConfig(req) {
+  let host = String(process.env.FRP_PUBLIC_HOST || '').trim();
+  let port = FRP_PUBLIC_PORT;
+  let tls = true;
+  if (!host) {
+    const u = new URL(serverUrl(req));
+    host = u.hostname;
+    tls = u.protocol === 'https:';
+    port = tls ? FRP_PUBLIC_PORT : (parseInt(u.port, 10) || (tls ? 443 : 80));
+  }
+  return { addr: host, port, tls };
+}
+
+function vncPassword() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  let s = '';
+  for (let i = 0; i < 8; i++) s += chars[crypto.randomInt(chars.length)];
+  return s;
+}
+
+function tcpReachable(host, port, timeoutMs = 2000) {
+  return new Promise((resolve) => {
+    const sock = net.connect({ host, port });
+    let done = false;
+    const finish = (ok) => { if (done) return; done = true; try { sock.destroy(); } catch { /* noop */ } resolve(ok); };
+    sock.setTimeout(timeoutMs, () => finish(false));
+    sock.once('connect', () => finish(true));
+    sock.once('error', () => finish(false));
+  });
+}
+
+adminApi.get('/devices/:id/remote', (req, res) => {
+  const d = db.prepare('SELECT id, hostname, platform, mac, remote_enabled, remote_port, vnc_password FROM devices WHERE id = ?').get(req.params.id);
+  if (!d) throw new HttpError(404, 'Dispositivo no encontrado');
+  res.json({ configured: remoteConfigured(), enabled: Boolean(d.remote_enabled), port: d.remote_port, password: d.vnc_password });
+});
+
+function queueRemoteEnable(d, req) {
+  if (d.status === 'retired' || d.platform === 'ipados') throw new HttpError(400, 'Este equipo no admite acceso remoto');
+  const port = allocateRemotePort(d.id);
+  const password = vncPassword();
+  const frp = remoteFrpConfig(req);
+  const ctx = { serverUrl: serverUrl(req) };
+  const prepared = cmds.prepare('enable_remote', {
+    port, password, frp_addr: frp.addr, frp_port: frp.port, frp_token: FRP_TOKEN, tls: frp.tls,
+  }, ctx);
+  const script = cmds.build('enable_remote', prepared.payload, d, ctx);
+  if (!script) throw new HttpError(400, 'No se pudo preparar el acceso remoto para esta plataforma');
+  const batch = randomToken(8);
+  const info = db.prepare(`INSERT INTO commands(batch_id, device_id, type, summary, payload, script, status, output, created_by, finished_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?)`)
+    .run(batch, d.id, 'enable_remote', prepared.summary, JSON.stringify(prepared.payload), script, 'pending', null, actor(req), null);
+  db.prepare('UPDATE devices SET remote_enabled = 0, remote_port = ?, vnc_password = ?, remote_enabled_at = NULL WHERE id = ?')
+    .run(port, password, d.id);
+  audit(actor(req), 'acceso_remoto_preparado', d.hostname, { port, command: Number(info.lastInsertRowid) }, clientIp(req));
+  return { command: Number(info.lastInsertRowid), port, password, online: Boolean(d.online) };
+}
+
+adminApi.post('/devices/:id/remote/enable', (req, res) => {
+  if (!remoteConfigured()) throw new HttpError(400, 'El acceso remoto no está configurado en el servidor (falta FRP_TOKEN).');
+  const d = db.prepare(`SELECT d.*, ${ONLINE_SQL} AS online FROM devices d WHERE d.id = ?`).get(req.params.id);
+  if (!d) throw new HttpError(404, 'Dispositivo no encontrado');
+  res.json({ ok: true, ...queueRemoteEnable(d, req) });
+});
+
+adminApi.post('/devices/remote/enable-bulk', (req, res) => {
+  if (!remoteConfigured()) throw new HttpError(400, 'El acceso remoto no está configurado en el servidor (falta FRP_TOKEN).');
+  const ids = Array.isArray(req.body.device_ids) ? [...new Set(req.body.device_ids)] : [];
+  if (!ids.length) throw new HttpError(400, 'Selecciona al menos un equipo');
+  const result = { queued: 0, skipped: 0, details: [] };
+  for (const id of ids) {
+    const d = db.prepare(`SELECT d.*, ${ONLINE_SQL} AS online FROM devices d WHERE d.id = ?`).get(id);
+    if (!d) { result.skipped++; continue; }
+    try {
+      const r = queueRemoteEnable(d, req);
+      result.queued++;
+      result.details.push(`${d.hostname}: puerto ${r.port}${r.online ? '' : ' (apagado, se preparará al encender)'}`);
+    } catch (e) {
+      result.skipped++;
+      result.details.push(`${d.hostname || id}: ${e.message}`);
+    }
+  }
+  res.json(result);
+});
+
+adminApi.post('/devices/:id/remote/disable', (req, res) => {
+  const d = db.prepare('SELECT * FROM devices WHERE id = ?').get(req.params.id);
+  if (!d) throw new HttpError(404, 'Dispositivo no encontrado');
+  if (d.platform !== 'macos' && d.platform !== 'windows') throw new HttpError(400, 'Este equipo no admite acceso remoto');
+  const prepared = cmds.prepare('disable_remote', {}, {});
+  const batch = randomToken(8);
+  const script = cmds.build('disable_remote', prepared.payload, d, { serverUrl: serverUrl(req) }) || '';
+  const info = db.prepare(`INSERT INTO commands(batch_id, device_id, type, summary, payload, script, status, output, created_by, finished_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?)`)
+    .run(batch, d.id, 'disable_remote', prepared.summary, '{}', script, 'pending', null, actor(req), null);
+  db.prepare('UPDATE devices SET remote_enabled = 0 WHERE id = ?').run(d.id);
+  audit(actor(req), 'acceso_remoto_desactivado', d.hostname, { command: Number(info.lastInsertRowid) }, clientIp(req));
+  res.json({ ok: true, command: Number(info.lastInsertRowid) });
+});
+
+adminApi.post('/devices/:id/remote/session', wrap(async (req, res) => {
+  if (!remoteConfigured()) throw new HttpError(400, 'El acceso remoto no está configurado en el servidor.');
+  const d = db.prepare('SELECT id, hostname, platform, remote_enabled, remote_port FROM devices WHERE id = ?').get(req.params.id);
+  if (!d) throw new HttpError(404, 'Dispositivo no encontrado');
+  if (!d.remote_enabled || !d.remote_port) throw new HttpError(400, 'El acceso remoto aún no está preparado en este equipo.');
+  if (!(await tcpReachable(FRPS_HOST, d.remote_port))) {
+    throw new HttpError(409, 'El túnel del equipo no está conectado. Enciéndelo, verifica su conexión y espera un minuto.');
+  }
+  const token = randomToken(32);
+  const expires = new Date(Date.now() + REMOTE_SESSION_MIN * 60_000).toISOString();
+  db.prepare('INSERT INTO remote_sessions(token_hash, admin_id, device_id, expires_at) VALUES(?,?,?,?)')
+    .run(sha256(token), req.admin.id, d.id, expires);
+  db.prepare('DELETE FROM remote_sessions WHERE expires_at < ?').run(new Date().toISOString());
+  audit(actor(req), 'sesion_remota', d.hostname, null, clientIp(req));
+  res.json({ token, url: `/remote.html?token=${encodeURIComponent(token)}`, expires_at: expires });
+}));
 
 // ---------- acciones / comandos ----------
 const getPackage = (id) => db.prepare('SELECT * FROM packages WHERE id = ?').get(parseInt(id, 10));
@@ -616,7 +921,13 @@ const ORG_SIGNOUT_LIMIT = 3000; // tope de seguridad por ejecución
 adminApi.get('/google/orgunits', wrap(async (req, res) => {
   if (!google.status().configured) throw new HttpError(400, 'Google Workspace no está configurado. Ver README, sección 3.');
   try {
-    res.json(await google.listOrgUnits());
+    const units = await google.listOrgUnits();
+    if (isLearner(req)) {
+      const unit = pickLearnerUnit(units);
+      if (unit) learnerUnitCache = { at: Date.now(), unit };
+      return res.json(unit ? [unit] : []);
+    }
+    res.json(units);
   } catch (e) {
     throw new HttpError(400, `No se pudo leer las unidades organizativas: ${e.message} (revisa que el alcance admin.directory.orgunit.readonly esté autorizado).`);
   }
@@ -624,10 +935,16 @@ adminApi.get('/google/orgunits', wrap(async (req, res) => {
 
 adminApi.get('/google/orgunits/users', wrap(async (req, res) => {
   if (!google.status().configured) throw new HttpError(400, 'Google Workspace no está configurado. Ver README, sección 3.');
-  const orgUnitPath = String(req.query.path || '').trim();
+  let orgUnitPath = String(req.query.path || '').trim();
   if (!orgUnitPath) throw new HttpError(400, 'Falta la unidad organizativa');
+  let includeChildren = req.query.includeChildren === '1' || req.query.includeChildren === 'true';
+  if (isLearner(req)) {
+    const unit = await assertLearnerOrgUnit(orgUnitPath);
+    orgUnitPath = unit.orgUnitPath;
+    includeChildren = true;
+  }
   try {
-    const users = await google.listUsersInOrgUnit(orgUnitPath);
+    const users = await google.listUsersInOrgUnit(orgUnitPath, { includeChildren });
     res.json({ count: users.length, users: users.slice(0, 20) });
   } catch (e) {
     throw new HttpError(400, `No se pudo leer los usuarios: ${e.message} (revisa que el alcance admin.directory.user.readonly esté autorizado).`);
@@ -636,12 +953,18 @@ adminApi.get('/google/orgunits/users', wrap(async (req, res) => {
 
 adminApi.post('/google/orgunits/signout', wrap(async (req, res) => {
   if (!google.status().configured) throw new HttpError(400, 'Google Workspace no está configurado. Ver README, sección 3.');
-  const orgUnitPath = String(req.body.orgUnitPath || '').trim();
+  let orgUnitPath = String(req.body.orgUnitPath || '').trim();
   if (!orgUnitPath) throw new HttpError(400, 'Falta la unidad organizativa');
   const revokeTokens = Boolean(req.body.revoke_tokens);
+  let includeChildren = req.body.includeChildren === true || req.body.includeChildren === 'true' || req.body.includeChildren === 1;
+  if (isLearner(req)) {
+    const unit = await assertLearnerOrgUnit(orgUnitPath);
+    orgUnitPath = unit.orgUnitPath;
+    includeChildren = true;
+  }
 
   let users;
-  try { users = await google.listUsersInOrgUnit(orgUnitPath); }
+  try { users = await google.listUsersInOrgUnit(orgUnitPath, { includeChildren }); }
   catch (e) { throw new HttpError(400, `No se pudo leer los usuarios de "${orgUnitPath}": ${e.message}`); }
   if (!users.length) throw new HttpError(400, `La unidad "${orgUnitPath}" no tiene usuarios.`);
   if (users.length > ORG_SIGNOUT_LIMIT) throw new HttpError(400, `La unidad tiene ${users.length} usuarios; el máximo por ejecución es ${ORG_SIGNOUT_LIMIT}.`);
@@ -662,7 +985,7 @@ adminApi.post('/google/orgunits/signout', wrap(async (req, res) => {
     }));
   }
   audit(actor(req), 'google_signout_org', `${orgUnitPath} (${users.length} usuarios)`,
-    { ok: results.ok, failed: results.failed, revokeTokens }, clientIp(req));
+    { ok: results.ok, failed: results.failed, revokeTokens, includeChildren }, clientIp(req));
   res.json(results);
 }));
 
@@ -681,6 +1004,12 @@ adminApi.get('/settings', wrap(async (req, res) => {
     install_macos: `curl -fsSL ${url}/install/macos.sh | sudo bash -s -- ${token}`,
     install_windows: `powershell -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm ${url}/install/windows.ps1))) -Token ${token}"`,
     google: google.status(),
+    remote: {
+      configured: remoteConfigured(),
+      public_host: process.env.FRP_PUBLIC_HOST || null,
+      port_start: REMOTE_PORT_START,
+      port_end: REMOTE_PORT_END,
+    },
     types: cmds.TYPES,
     file_presets: Object.fromEntries(Object.entries(cmds.FILE_PRESETS).map(([k, v]) => [k, v.label])),
     agent_version: AGENT_VERSION,
@@ -720,14 +1049,35 @@ adminApi.post('/settings/rotate-token', (req, res) => {
   res.json({ ok: true });
 });
 
-adminApi.get('/admins', (req, res) => res.json(db.prepare('SELECT id, username, created_at FROM admins ORDER BY id').all()));
+adminApi.get('/admins', (req, res) => res.json(db.prepare('SELECT id, username, email, role, created_at FROM admins ORDER BY id').all()));
 adminApi.post('/admins', (req, res) => {
   const { username, password } = req.body || {};
+  const role = isRole(req.body && req.body.role) ? req.body.role : 'aprendiz';
+  const email = String((req.body && req.body.email) || '').trim().toLowerCase();
   if (!/^[\w.@-]{3,40}$/.test(String(username || ''))) throw new HttpError(400, 'Usuario no válido');
   if (String(password || '').length < 10) throw new HttpError(400, 'La contraseña debe tener al menos 10 caracteres');
-  try { db.prepare('INSERT INTO admins(username, password_hash) VALUES(?,?)').run(username, hashPassword(password)); }
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, 'Correo no válido');
+  if (!isRole(role)) throw new HttpError(400, 'Rol no válido');
+  try { db.prepare('INSERT INTO admins(username, password_hash, role, email) VALUES(?,?,?,?)').run(username, hashPassword(password), role, email || null); }
   catch { throw new HttpError(400, 'Ese usuario ya existe'); }
-  audit(actor(req), 'admin_creado', username, null, clientIp(req));
+  audit(actor(req), 'admin_creado', username, { role }, clientIp(req));
+  res.json({ ok: true });
+});
+adminApi.patch('/admins/:id', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const a = db.prepare('SELECT * FROM admins WHERE id = ?').get(id);
+  if (!a) throw new HttpError(404, 'Usuario no encontrado');
+  const b = req.body || {};
+  const role = b.role === undefined ? a.role : b.role;
+  if (!isRole(role)) throw new HttpError(400, 'Rol no válido');
+  const email = b.email === undefined ? a.email : (String(b.email || '').trim().toLowerCase() || null);
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, 'Correo no válido');
+  if (id === req.admin.id && a.role !== 'aprendiz' && role === 'aprendiz') {
+    throw new HttpError(400, 'No puedes quitarte a ti mismo el acceso completo.');
+  }
+  db.prepare('UPDATE admins SET role = ?, email = ? WHERE id = ?').run(role, email, id);
+  if (a.role !== role) db.prepare('DELETE FROM sessions WHERE admin_id = ?').run(id);
+  audit(actor(req), 'admin_editado', a.username, { role, email }, clientIp(req));
   res.json({ ok: true });
 });
 adminApi.delete('/admins/:id', (req, res) => {
@@ -765,6 +1115,18 @@ adminApi.get('/stats', (req, res) => {
   res.json({ ...r, pending, failed24 });
 });
 
+// Capacidad de una sola sesión remota: la página noVNC obtiene la contraseña VNC.
+app.get('/api/remote/session/:token', (req, res) => {
+  const row = db.prepare(`SELECT rs.expires_at, d.id AS device_id, d.hostname, d.vnc_password, d.remote_enabled, d.remote_port
+    FROM remote_sessions rs JOIN devices d ON d.id = rs.device_id WHERE rs.token_hash = ?`).get(sha256(req.params.token));
+  if (!row || row.expires_at <= new Date().toISOString() || !row.remote_enabled) {
+    return res.status(404).json({ error: 'Sesión remota no válida o vencida. Vuelve a abrir el acceso remoto desde el panel.' });
+  }
+  res.set('Cache-Control', 'no-store').json({
+    device_id: row.device_id, hostname: row.hostname, password: row.vnc_password, expires_at: row.expires_at,
+  });
+});
+
 app.use('/api', adminApi);
 
 // ---------- errores ----------
@@ -781,4 +1143,61 @@ setInterval(() => {
               finished_at = ? WHERE status = 'running' AND sent_at < datetime('now','-2 hours')`).run(nowSql());
 }, 5 * 60_000).unref();
 
-app.listen(PORT, () => console.log(`FleetControl escuchando en http://localhost:${PORT}`));
+const server = app.listen(PORT, () => console.log(`FleetControl escuchando en http://localhost:${PORT}`));
+
+// =====================================================================
+//  Túneles WebSocket: frp (equipos → servidor) y VNC (panel → equipo)
+// =====================================================================
+const frpProxy = httpProxy.createProxyServer({ target: `ws://${FRPS_HOST}:${FRPS_PORT}`, ws: true, changeOrigin: false });
+frpProxy.on('error', (err, req, socket) => {
+  console.error('[frp] proxy:', err.message);
+  try { socket.destroy(); } catch { /* noop */ }
+});
+// frps exige un Origin válido en el handshake WebSocket.
+frpProxy.on('proxyReqWs', (proxyReq) => {
+  if (!proxyReq.getHeader('origin')) {
+    proxyReq.setHeader('origin', `https://${process.env.FRP_PUBLIC_HOST || 'registro.tvs.edu.co'}`);
+  }
+});
+const vncWss = new WebSocketServer({ noServer: true });
+const rejectUpgrade = (socket, status, message) => {
+  try {
+    socket.write(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  } catch { /* noop */ }
+  try { socket.destroy(); } catch { /* noop */ }
+};
+
+server.on('upgrade', (req, socket, head) => {
+  let url;
+  try { url = new URL(req.url, 'http://localhost'); } catch { return rejectUpgrade(socket, 400, 'Bad Request'); }
+  if (url.pathname === '/frpws') {
+    if (!FRP_TOKEN) return rejectUpgrade(socket, 503, 'Service Unavailable');
+    return frpProxy.ws(req, socket, head);
+  }
+  if (url.pathname !== '/api/remote/vnc') return rejectUpgrade(socket, 404, 'Not Found');
+
+  const token = url.searchParams.get('token') || '';
+  const row = db.prepare(`SELECT rs.expires_at, d.remote_enabled, d.remote_port
+    FROM remote_sessions rs JOIN devices d ON d.id = rs.device_id WHERE rs.token_hash = ?`).get(sha256(token));
+  if (!row || row.expires_at <= new Date().toISOString() || !row.remote_enabled || !row.remote_port) {
+    return rejectUpgrade(socket, 401, 'Unauthorized');
+  }
+  const conn = net.connect({ host: FRPS_HOST, port: row.remote_port });
+  let upgraded = false;
+  const fail = () => { try { conn.destroy(); } catch { /* noop */ } if (!upgraded) rejectUpgrade(socket, 502, 'Bad Gateway'); };
+  conn.setTimeout(5000, fail);
+  conn.once('error', fail);
+  conn.once('connect', () => {
+    conn.setTimeout(0);
+    vncWss.handleUpgrade(req, socket, head, (ws) => {
+      upgraded = true;
+      ws.binaryType = 'nodebuffer';
+      ws.on('message', (data) => { try { conn.write(data); } catch { /* noop */ } });
+      conn.on('data', (data) => { try { if (ws.readyState === ws.OPEN) ws.send(data, { binary: true }); } catch { /* noop */ } });
+      const ping = setInterval(() => { try { if (ws.readyState === ws.OPEN) ws.ping(); } catch { /* noop */ } }, 30_000);
+      ws.on('close', () => { clearInterval(ping); try { conn.destroy(); } catch { /* noop */ } });
+      ws.on('error', () => { try { conn.destroy(); } catch { /* noop */ } });
+      conn.on('close', () => { try { ws.close(); } catch { /* noop */ } });
+    });
+  });
+});

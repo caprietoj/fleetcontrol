@@ -1,7 +1,7 @@
 #!/bin/bash
 # FleetControl · agente para macOS
 # Lo ejecuta launchd (com.fleetcontrol.agent) como root cada 60 segundos.
-AGENT_VERSION="1.0.0"
+AGENT_VERSION="1.1.0"
 DIR="/Library/Application Support/FleetControl"
 CONF="$DIR/config"
 LOG="$DIR/agent.log"
@@ -39,6 +39,13 @@ inventory() {
   # En APFS el espacio libre real se ve mejor en el volumen de datos
   [ -d /System/Volumes/Data ] && disk_free=$(df -k /System/Volumes/Data | awk 'NR==2{printf "%.1f", $4/1048576}')
   ip=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null)
+  # Direcciones MAC de las interfaces físicas (para Wake-on-LAN)
+  macs=$(networksetup -listallhardwareports 2>/dev/null | awk -F': ' '/Ethernet Address/{print $2}' \
+    | grep -E '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$' | grep -v '^00:00:00:00:00:00$' \
+    | tr '[:lower:]' '[:upper:]' | sort -u | paste -sd, -)
+  mac1=$(echo "$macs" | cut -d, -f1)
+  macjson=$(echo "$macs" | tr ',' '\n' | sed 's/.*/"&"/' | paste -sd, -)
+  [ -n "$macjson" ] && macjson="[$macjson]" || macjson="[]"
   user=$(stat -f%Su /dev/console)
   # Cuentas de Google con sesión en Chrome/Edge/Brave
   accounts=$(for f in /Users/*/Library/Application\ Support/{Google/Chrome,Microsoft\ Edge,BraveSoftware/Brave-Browser}/Local\ State; do
@@ -48,6 +55,7 @@ inventory() {
 {"platform":"macos","hostname":"$(jesc "$(scutil --get ComputerName 2>/dev/null || hostname)")","serial":"$(jesc "$serial")",
 "manufacturer":"Apple","model":"$(jesc "$model")","os_version":"$(jesc "$os")","cpu":"$(jesc "$cpu")",
 "ram_gb":"$ram","disk_total_gb":"$disk_total","disk_free_gb":"$disk_free","ip":"$(jesc "$ip")",
+"mac":"$(jesc "$mac1")","macs":$macjson,
 "logged_user":"$(jesc "$user")","google_accounts":"$(jesc "$accounts")","agent_version":"$AGENT_VERSION"}
 EOF
 }

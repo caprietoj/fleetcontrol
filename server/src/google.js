@@ -120,24 +120,44 @@ const normPath = (p) => String(p || '').replace(/\/+$/, '') || '/';
 // con su propio lenguaje de búsqueda. Los valores con espacios deben ir entre comillas.
 const quoteQueryValue = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
 
-/** Lista los usuarios de una unidad organizativa exacta (no incluye subunidades hijas). */
-async function listUsersInOrgUnit(orgUnitPath) {
-  const users = [];
-  let pageToken = '';
-  do {
-    const qs = new URLSearchParams({
-      customer: 'my_customer', maxResults: '200', projection: 'basic', orderBy: 'email',
-      query: `orgUnitPath=${quoteQueryValue(orgUnitPath)}`,
-    });
-    if (pageToken) qs.set('pageToken', pageToken);
-    const data = await api('GET', `${DIR}/users?${qs}`);
-    for (const u of (data && data.users) || []) {
-      // Red de seguridad: si Google devolviera algo fuera de la unidad, se descarta aquí.
-      if (u.orgUnitPath && normPath(u.orgUnitPath) !== normPath(orgUnitPath)) continue;
-      users.push({ email: u.primaryEmail, name: (u.name && u.name.fullName) || u.primaryEmail, suspended: Boolean(u.suspended) });
+/**
+ * Lista los usuarios de una unidad organizativa.
+ * Con includeChildren: true también incluye las subunidades hijas (por ejemplo
+ * "Estudiantes Activos" → "Estudiantes Activos/Estudiantes Primaria/...").
+ */
+async function listUsersInOrgUnit(orgUnitPath, { includeChildren = false } = {}) {
+  const base = normPath(orgUnitPath);
+  const targets = [base];
+  if (includeChildren) {
+    const units = await listOrgUnits();
+    for (const u of units) {
+      const p = normPath(u.orgUnitPath);
+      if (p !== base && (p + '/').startsWith(base + '/')) targets.push(p);
     }
-    pageToken = (data && data.nextPageToken) || '';
-  } while (pageToken);
+  }
+
+  const users = [];
+  const seen = new Set();
+  for (const target of targets) {
+    let pageToken = '';
+    do {
+      const qs = new URLSearchParams({
+        customer: 'my_customer', maxResults: '200', projection: 'basic', orderBy: 'email',
+        query: `orgUnitPath=${quoteQueryValue(target)}`,
+      });
+      if (pageToken) qs.set('pageToken', pageToken);
+      const data = await api('GET', `${DIR}/users?${qs}`);
+      for (const u of (data && data.users) || []) {
+        // Red de seguridad: si Google devolviera algo fuera de la unidad, se descarta aquí.
+        if (u.orgUnitPath && normPath(u.orgUnitPath) !== target) continue;
+        const key = String(u.primaryEmail || '').toLowerCase();
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        users.push({ email: u.primaryEmail, name: (u.name && u.name.fullName) || u.primaryEmail, suspended: Boolean(u.suspended) });
+      }
+      pageToken = (data && data.nextPageToken) || '';
+    } while (pageToken);
+  }
   return users;
 }
 

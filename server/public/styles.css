@@ -50,7 +50,8 @@ h1 { font-size: 22px; margin: 0; } h3 { margin: 0 0 8px; font-size: 15px; }
 .sidebar nav a { color: var(--side-ink); padding: 8px 10px; border-radius: 7px; text-decoration: none; }
 .sidebar nav a:hover { background: rgba(255,255,255,.08); }
 .sidebar nav a.active { background: rgba(255,255,255,.14); color: #fff; box-shadow: inset 3px 0 0 #fff; }
-.sidebar-foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 6px; }
+.sidebar-foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 6px; flex-wrap: wrap; }
+.sidebar-foot .role-tag { font-size: 11px; background: rgba(255,255,255,.12); color: #fff; padding: 2px 8px; border-radius: 999px; }
 .main { padding: 22px 28px; min-width: 0; }
 .view { display: grid; gap: 14px; }
 .view-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -158,3 +159,16 @@ details summary { cursor: pointer; color: var(--accent); font-weight: 600; }
   .main { padding: 16px; }
   .checks { grid-template-columns: 1fr 1fr; }
 }
+
+/* ===== Acceso remoto (noVNC) ===== */
+body.remote-page { margin: 0; overflow: hidden; background: #0b1020; color: #e5e7eb; font-family: system-ui, -apple-system, sans-serif; }
+#remoteBar { position: fixed; inset: 0 0 auto 0; height: 48px; display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 0 14px; background: #0b2a55; color: #fff; z-index: 20; }
+#remoteBar .remote-title { font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#remoteBar .remote-actions { display: flex; gap: 6px; }
+#remoteBar .btn.ghost { color: #fff; border-color: rgba(255,255,255,.35); background: transparent; }
+#screen { position: fixed; inset: 48px 0 0 0; background: #000; }
+#screen canvas { display: block; }
+.remote-status { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 30;
+  background: rgba(17,24,39,.92); color: #fff; padding: 14px 22px; border-radius: 10px; font-size: 15px; }
+.remote-status.ok { background: rgba(18,128,92,.95); }

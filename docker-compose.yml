@@ -3,12 +3,23 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    depends_on:
+      - frps
     environment:
       PUBLIC_URL: https://${DOMAIN}
       GOOGLE_SA_KEY_FILE: ${GOOGLE_SA_KEY_FILE:-}
     volumes:
       - ./data:/data
       - ./secrets:/secrets:ro      # coloca aquí la llave JSON de Google
+
+  frps:
+    build: ./frps
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      FRP_TOKEN: ${FRP_TOKEN}
+      FRP_REMOTE_PORT_START: ${FRP_REMOTE_PORT_START:-41000}
+      FRP_REMOTE_PORT_END: ${FRP_REMOTE_PORT_END:-41099}
   caddy:
     image: caddy:2
     restart: unless-stopped

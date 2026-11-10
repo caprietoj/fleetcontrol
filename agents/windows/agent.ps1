@@ -1,6 +1,6 @@
 # FleetControl · agente para Windows
 # Lo ejecuta una tarea programada ("FleetControl Agent") como SYSTEM cada minuto.
-$AgentVersion = '1.0.0'
+$AgentVersion = '1.1.0'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -31,6 +31,13 @@ function Get-Inventory {
       Where-Object { $_.IPAddress -notlike '169.254*' -and $_.IPAddress -ne '127.0.0.1' } |
       Sort-Object InterfaceMetric | Select-Object -First 1).IPAddress
   } catch {}
+  # Direcciones MAC físicas (para Wake-on-LAN)
+  $macs = @()
+  try {
+    $macs = @(Get-CimInstance Win32_NetworkAdapter -ErrorAction Stop |
+      Where-Object { $_.MACAddress -and $_.Description -notmatch 'Virtual|VMware|Hyper-V|TAP|VPN|Bluetooth|Loopback|WAN Miniport|WireGuard|Tailscale' } |
+      ForEach-Object { $_.MACAddress.ToUpper() } | Sort-Object -Unique)
+  } catch {}
   # Cuentas de Google con sesión en Chrome/Edge/Brave
   $accounts = @()
   $profiles = Get-CimInstance Win32_UserProfile | Where-Object { -not $_.Special -and $_.LocalPath }
@@ -57,6 +64,8 @@ function Get-Inventory {
     disk_total_gb   = [math]::Round($disk.Size / 1GB, 1)
     disk_free_gb    = [math]::Round($disk.FreeSpace / 1GB, 1)
     ip              = $ip
+    mac             = $(if ($macs.Count -gt 0) { $macs[0] } else { $null })
+    macs            = @($macs)
     logged_user     = $cs.UserName
     google_accounts = @($accounts | Sort-Object -Unique)
     agent_version   = $AgentVersion
